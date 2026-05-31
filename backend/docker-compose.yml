@@ -1,0 +1,13 @@
+version: "3.9"
+services:
+  api:
+    build: .
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    environment:
+      - FRONTEND_URL=https://mithraai.in
+    restart: unless-stopped
+    volumes:
+      - ./mithra.db:/app/mithra.db
