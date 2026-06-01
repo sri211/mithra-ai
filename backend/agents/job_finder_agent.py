@@ -1,10 +1,14 @@
 """
-Job Finder Agent — generates realistic, contextually relevant job listings via Claude.
+Job Finder Agent — fetches real jobs via JSearch API (RapidAPI), falls back to Claude generation.
 """
 import json
 import uuid
+import os
+import httpx
 from services.claude_service import complete_claude_json
 from loguru import logger
+
+RAPIDAPI_KEY = os.getenv("RAPIDAPI_KEY", "")
 
 SYSTEM_JOB_GENERATOR = """You are India's most comprehensive real-time job database. Generate EXACTLY 8 realistic, highly relevant job listings for the given search query. The current year is 2026.
 
@@ -166,6 +170,91 @@ async def generate_jobs_with_claude(
     return []
 
 
+async def fetch_jobs_from_jsearch(
+    query: str,
+    location: str = "",
+) -> list[dict]:
+    """Fetch real job listings from JSearch API (RapidAPI). Returns [] on failure."""
+    if not RAPIDAPI_KEY:
+        return []
+
+    search_query = f"{query} {location}".strip()
+    url = "https://jsearch.p.rapidapi.com/search"
+    params = {"query": search_query, "page": "1", "num_pages": "2", "date_posted": "all"}
+    headers = {
+        "X-RapidAPI-Key": RAPIDAPI_KEY,
+        "X-RapidAPI-Host": "jsearch.p.rapidapi.com",
+    }
+
+    try:
+        async with httpx.AsyncClient(timeout=12.0) as client:
+            resp = await client.get(url, params=params, headers=headers)
+            resp.raise_for_status()
+            data = resp.json()
+
+        raw_jobs = data.get("data", [])
+        if not raw_jobs:
+            return []
+
+        jobs: list[dict] = []
+        for rj in raw_jobs[:8]:
+            job_title = rj.get("job_title", "")
+            employer = rj.get("employer_name", "")
+            city = rj.get("job_city") or rj.get("job_country") or "India"
+            apply_link = rj.get("job_apply_link", "")
+            description = rj.get("job_description", "")[:400]
+            posted_dt = rj.get("job_posted_at_datetime_utc", "")
+            sal_min = rj.get("job_min_salary") or 0
+            sal_max = rj.get("job_max_salary") or 0
+            sal_currency = rj.get("job_salary_currency") or "INR"
+            emp_type = rj.get("job_employment_type") or "Full-time"
+            required_skills = rj.get("job_required_skills") or []
+
+            # Build portal info from apply_link domain
+            portal = "JSearch"
+            portal_url = apply_link
+            if "linkedin.com" in apply_link:
+                portal = "LinkedIn"
+            elif "indeed.com" in apply_link:
+                portal = "Indeed"
+            elif "naukri.com" in apply_link:
+                portal = "Naukri"
+            elif "glassdoor.com" in apply_link:
+                portal = "Glassdoor"
+
+            domain = employer.lower().replace(" ", "").replace(",", "").replace(".", "") + ".com"
+
+            jobs.append({
+                "id": f"job_{uuid.uuid4().hex[:6]}",
+                "title": job_title,
+                "company": employer,
+                "company_logo": f"https://logo.clearbit.com/{domain}",
+                "location": f"{city}, India" if "india" not in city.lower() else city,
+                "remote": "Remote" if rj.get("job_is_remote") else "On-site",
+                "salary_min": int(sal_min) if sal_min else 0,
+                "salary_max": int(sal_max) if sal_max else 0,
+                "salary_currency": sal_currency,
+                "experience_required": "",
+                "posted_date": posted_dt[:10] if posted_dt else "",
+                "description": description,
+                "skills": required_skills[:6] if required_skills else [],
+                "portal": portal,
+                "portal_url": portal_url,
+                "url": apply_link,
+                "job_type": emp_type,
+                "seniority": "Mid",
+                "match_score": 75,
+                "is_real_listing": True,
+            })
+
+        logger.info(f"JSearch returned {len(jobs)} real jobs for '{search_query}'")
+        return jobs
+
+    except Exception as e:
+        logger.error(f"JSearch API failed: {e}")
+        return []
+
+
 async def search_jobs(
     query: str,
     location: str = "",
@@ -178,13 +267,32 @@ async def search_jobs(
     if not query or not query.strip():
         return FALLBACK_JOBS
 
-    # Use Claude to generate contextually relevant jobs for the query
+    # Try JSearch (real listings) first
+    if RAPIDAPI_KEY:
+        real_jobs = await fetch_jobs_from_jsearch(query, location)
+        if real_jobs:
+            return real_jobs
+        logger.warning("JSearch returned no results, falling back to Claude generation")
+
+    # Fall back to Claude generation
     jobs = await generate_jobs_with_claude(query, location, experience_years, remote, salary_min)
     if jobs:
+        # Mark as Claude-generated (not real listings) and set Google Jobs fallback URLs
+        for job in jobs:
+            job["is_real_listing"] = False
+            if not job.get("url") or job["url"] in ("#", ""):
+                title_enc = job.get("title", query).replace(" ", "+")
+                company_enc = job.get("company", "").replace(" ", "+")
+                job["url"] = f"https://www.google.com/search?q={title_enc}+{company_enc}+jobs"
         return jobs
 
-    # Fallback: return default jobs with query appended to title
     logger.warning(f"Claude generation failed for query: {query}, using fallback")
+    # Fallback jobs also get Google search URLs
+    for job in FALLBACK_JOBS:
+        job["is_real_listing"] = False
+        title_enc = job.get("title", "").replace(" ", "+")
+        company_enc = job.get("company", "").replace(" ", "+")
+        job.setdefault("url", f"https://www.google.com/search?q={title_enc}+{company_enc}+jobs")
     return FALLBACK_JOBS
 
 

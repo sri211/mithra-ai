@@ -32,6 +32,11 @@ async def lifespan(app: FastAPI):
     logger.info("Starting Mithra AI Backend...")
     await init_db()
     asyncio.create_task(ensure_playwright_browsers())
+    rapidapi_key = os.getenv("RAPIDAPI_KEY", "")
+    if rapidapi_key:
+        logger.info("JSearch API (RapidAPI) is ENABLED — real job listings active")
+    else:
+        logger.warning("JSearch API not configured (RAPIDAPI_KEY missing) — using Claude-generated jobs")
     yield
     logger.info("Shutting down Mithra AI Backend...")
 

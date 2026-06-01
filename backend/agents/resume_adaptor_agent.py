@@ -18,6 +18,8 @@ PROCESS (follow this exactly):
 RULES:
 - Never fabricate experience or skills that aren't implied by the original resume.
 - Never make the resume worse — every change must improve relevance.
+- The `original` field in each suggested change MUST be copied VERBATIM from the resume field provided in the prompt. NEVER invent, hallucinate, or paraphrase the original text. Copy it exactly as given in the "ACTUAL CURRENT ..." sections below.
+- Only suggest changes to sections that are genuinely relevant to this specific JD. If the candidate is an HR/MBA professional applying for an HR role, do NOT suggest adding software engineering, distributed systems, or coding skills that are not in their background.
 - suggested_changes must list SPECIFIC before/after text with reasons, not vague descriptions.
 - cover_letter_hook must be unique to this candidate + this role — reference their strongest relevant achievement.
 - interview_prep_tip must name the specific technical area or behavioural theme the company will focus on.
@@ -68,16 +70,46 @@ async def parse_job_description(jd_text: str) -> dict:
 
 
 async def adapt_resume(resume: dict, jd_text: str, jd_parsed: dict) -> dict:
+    # Extract literal section texts so Claude cannot hallucinate the "original" values
+    personal = resume.get("personal", {})
+    summary_text = resume.get("summary", "")
+    title_text = personal.get("title", "")
+    skills = resume.get("skills", {})
+    tech_skills = skills.get("technical", [])
+    soft_skills = skills.get("soft", [])
+    certs = skills.get("certifications", [])
+
+    experience_texts = []
+    for i, exp in enumerate(resume.get("experience", [])):
+        bullets = "\n".join(f"    - {b}" for b in exp.get("bullets", []) if b)
+        experience_texts.append(
+            f"  [{i}] {exp.get('role', '')} at {exp.get('company', '')} "
+            f"({exp.get('start', '')}–{'Present' if exp.get('current') else exp.get('end', '')})\n{bullets}"
+        )
+
+    verbatim_section = f"""
+ACTUAL RESUME CONTENT — use these VERBATIM for the `original` field in suggested_changes:
+
+ACTUAL CURRENT TITLE: {title_text}
+ACTUAL CURRENT SUMMARY: {summary_text}
+ACTUAL CURRENT TECHNICAL SKILLS: {", ".join(tech_skills)}
+ACTUAL CURRENT SOFT SKILLS: {", ".join(soft_skills)}
+ACTUAL CURRENT CERTIFICATIONS: {", ".join(certs)}
+ACTUAL CURRENT EXPERIENCE:
+{"".join(experience_texts)}
+"""
+
     content = f"""JOB DESCRIPTION:
 {jd_text}
 
 PARSED JD:
 {json.dumps(jd_parsed, indent=2)}
 
-CURRENT RESUME:
+CURRENT RESUME (full JSON):
 {json.dumps(resume, indent=2)}
-
-Adapt this resume to maximize ATS score and interview chances for this specific role."""
+{verbatim_section}
+Adapt this resume to maximize ATS score and interview chances for this specific role.
+REMINDER: The `original` field in every suggested_change must be copied VERBATIM from the "ACTUAL CURRENT ..." lines above."""
 
     messages = [{"role": "user", "content": content}]
     raw = await complete_claude_json(SYSTEM_ADAPTOR, messages)
