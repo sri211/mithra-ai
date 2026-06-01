@@ -6,7 +6,7 @@ import uuid
 from services.claude_service import complete_claude_json
 from loguru import logger
 
-SYSTEM_JOB_GENERATOR = """You are India's most comprehensive real-time job database. Generate EXACTLY 8 realistic, highly relevant job listings for the given search query.
+SYSTEM_JOB_GENERATOR = """You are India's most comprehensive real-time job database. Generate EXACTLY 8 realistic, highly relevant job listings for the given search query. The current year is 2026.
 
 CRITICAL RULES:
 1. ALL 8 jobs MUST match the search query directly (e.g., "ecommerce manager" → E-Commerce Manager, Category Manager, Marketplace Manager, etc.)
@@ -21,6 +21,14 @@ CRITICAL RULES:
 4. Use specified salary range if given; otherwise use market-accurate ranges
 5. Each job needs 5-6 skills SPECIFIC to that role
 6. Descriptions must be detailed and realistic (2-3 sentences with team size, tech stack, impact)
+7. PORTAL URLS must be REAL search URLs — not homepages:
+   - LinkedIn: "https://www.linkedin.com/jobs/search/?keywords={URL-encoded+job+title}&location={URL-encoded+location}"
+   - Naukri: "https://www.naukri.com/{job-title-slug}-jobs-in-{location-slug}"
+   - Indeed: "https://in.indeed.com/jobs?q={URL-encoded+job+title}&l={URL-encoded+location}"
+   - Glassdoor: "https://www.glassdoor.co.in/Job/{location-slug}-{job-title-slug}-jobs-SRCH_IL.0,10_IC{id}_KO{n}.htm"
+   - Instahyre: "https://www.instahyre.com/jobs/?q={job-title}"
+8. posted_date MUST be in 2026 (e.g., "2026-05-28", "2026-05-25") — NEVER use 2024.
+9. url field: construct the most relevant direct application/search URL for that specific company+role.
 
 SALARY BENCHMARKS (INR per year):
 - Entry (0-2yr): 4L-12L | Mid (2-5yr): 12L-25L | Senior (5-8yr): 25L-50L | Lead (8+yr): 45L-80L | Director: 80L-1.5Cr
@@ -38,11 +46,12 @@ Output ONLY a valid JSON array with EXACTLY 8 jobs (no other text, no markdown):
     "salary_max": <integer INR>,
     "salary_currency": "INR",
     "experience_required": "X-Y years",
-    "posted_date": "2024-01-<DD between 10-28>",
+    "posted_date": "2026-05-<DD between 10-31>",
     "description": "2-3 sentence specific description with actual tech/product context",
     "skills": ["role-specific skill 1", "skill 2", "skill 3", "skill 4", "skill 5"],
     "portal": "LinkedIn|Naukri|Indeed|Glassdoor|Instahyre|AngelList",
-    "portal_url": "https://linkedin.com/jobs",
+    "portal_url": "<real search URL as described in rule 7 above>",
+    "url": "<real search/listing URL for this specific company+role>",
     "job_type": "Full-time",
     "seniority": "Entry|Mid|Senior|Lead|Principal|Director",
     "match_score": <integer 72-95>

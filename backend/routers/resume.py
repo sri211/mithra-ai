@@ -239,14 +239,182 @@ async def edit_resume_route(req: ResumeEditRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+def _extract_jd_text_from_html(html: str) -> tuple[str, str]:
+    """
+    Extract job description text from HTML.
+    Returns (text, title).
+    Looks for JSON-LD structured data, meta tags, and article/main/section content.
+    """
+    import re as _re
+
+    soup = BeautifulSoup(html, "lxml")
+
+    # Extract title before removing anything
+    title = ""
+    if soup.title and soup.title.string:
+        title = soup.title.string.strip()
+    # Prefer og:title for cleaner job title
+    og_title = soup.find("meta", property="og:title")
+    if og_title and og_title.get("content"):
+        title = og_title["content"].strip()
+
+    parts: list[str] = []
+
+    # ── 1. JSON-LD structured data (JobPosting schema) ───────────────────────
+    for script in soup.find_all("script", type="application/ld+json"):
+        try:
+            data = json.loads(script.string or "")
+            if isinstance(data, list):
+                data = data[0] if data else {}
+            jtype = data.get("@type", "")
+            if "job" in str(jtype).lower() or "Job" in str(jtype):
+                if data.get("title"):
+                    parts.append(f"Job Title: {data['title']}")
+                if data.get("hiringOrganization"):
+                    org = data["hiringOrganization"]
+                    if isinstance(org, dict):
+                        parts.append(f"Company: {org.get('name', '')}")
+                if data.get("jobLocation"):
+                    loc = data["jobLocation"]
+                    if isinstance(loc, dict):
+                        addr = loc.get("address", {})
+                        if isinstance(addr, dict):
+                            parts.append(f"Location: {addr.get('addressLocality', '')} {addr.get('addressRegion', '')} {addr.get('addressCountry', '')}".strip())
+                if data.get("description"):
+                    parts.append(f"Description:\n{data['description']}")
+                if data.get("qualifications"):
+                    parts.append(f"Qualifications:\n{data['qualifications']}")
+                if data.get("responsibilities"):
+                    parts.append(f"Responsibilities:\n{data['responsibilities']}")
+                if data.get("skills"):
+                    parts.append(f"Skills: {data['skills']}")
+                if data.get("baseSalary"):
+                    parts.append(f"Salary: {json.dumps(data['baseSalary'])}")
+        except Exception:
+            pass
+
+    # ── 2. Meta description ───────────────────────────────────────────────────
+    og_desc = soup.find("meta", property="og:description")
+    if og_desc and og_desc.get("content"):
+        parts.append(f"Summary: {og_desc['content']}")
+    meta_desc = soup.find("meta", attrs={"name": "description"})
+    if meta_desc and meta_desc.get("content"):
+        parts.append(f"Meta: {meta_desc['content']}")
+
+    # ── 3. Visible content from job-specific selectors ───────────────────────
+    # Remove boilerplate before extracting text
+    for tag in soup(["script", "style", "nav", "footer", "header", "noscript", "aside", "meta", "link"]):
+        tag.decompose()
+
+    main_content = None
+    for selector in [
+        "[class*='job-description']",
+        "[class*='jobDescription']",
+        "[class*='job_description']",
+        "[id*='job-description']",
+        "[id*='jobDescription']",
+        "[class*='description__text']",
+        "[class*='show-more-less-html']",
+        "[class*='jobDetail']",
+        "[class*='job-detail']",
+        "[class*='posting']",
+        "article",
+        "main",
+        "[role='main']",
+        "section",
+    ]:
+        found = soup.select_one(selector)
+        if found:
+            txt = found.get_text(separator="\n", strip=True)
+            if len(txt) > 200:
+                main_content = found
+                break
+
+    if main_content:
+        parts.append(main_content.get_text(separator="\n", strip=True))
+    elif not parts:
+        body = soup.find("body")
+        if body:
+            parts.append(body.get_text(separator="\n", strip=True))
+
+    raw_text = "\n\n".join(parts)
+
+    # Clean up excessive blank lines
+    lines = [line.strip() for line in raw_text.splitlines()]
+    cleaned_lines: list[str] = []
+    prev_blank = False
+    for line in lines:
+        if line:
+            cleaned_lines.append(line)
+            prev_blank = False
+        elif not prev_blank:
+            cleaned_lines.append("")
+            prev_blank = True
+
+    text = "\n".join(cleaned_lines).strip()
+    if len(text) > 8000:
+        text = text[:8000] + "\n\n[Content truncated...]"
+
+    return text, title
+
+
+async def _fetch_jd_with_playwright(url: str) -> tuple[str, str]:
+    """Render JS-heavy pages (Deloitte, Naukri, LinkedIn jobs) with Playwright."""
+    try:
+        from playwright.async_api import async_playwright
+        async with async_playwright() as p:
+            browser = await p.chromium.launch(
+                headless=True,
+                args=[
+                    "--disable-blink-features=AutomationControlled",
+                    "--no-sandbox",
+                    "--disable-setuid-sandbox",
+                    "--disable-dev-shm-usage",
+                    "--disable-gpu",
+                    "--no-first-run",
+                ],
+            )
+            context = await browser.new_context(
+                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+                viewport={"width": 1440, "height": 900},
+                locale="en-US",
+                extra_http_headers={
+                    "Accept-Language": "en-US,en;q=0.9",
+                    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                },
+            )
+            await context.add_init_script(
+                "Object.defineProperty(navigator, 'webdriver', { get: () => undefined });"
+            )
+            page = await context.new_page()
+            try:
+                await page.goto(url, wait_until="domcontentloaded", timeout=25000)
+                await page.wait_for_timeout(3000)
+                html = await page.content()
+            except Exception:
+                html = await page.content()
+            await browser.close()
+            return _extract_jd_text_from_html(html)
+    except ImportError:
+        return "", ""
+    except Exception as e:
+        from loguru import logger
+        logger.warning(f"Playwright JD fetch failed: {e}")
+        return "", ""
+
+
 @router.post("/fetch-jd")
 async def fetch_jd_route(req: FetchJDRequest):
-    """Fetch a job description or LinkedIn profile from a URL."""
+    """Fetch a job description or LinkedIn profile from a URL.
+    Strategy:
+    1. Try httpx first (fast for simple pages)
+    2. If content <500 meaningful chars, fall back to Playwright headless browser
+    """
     url = req.url.strip()
     if not url.startswith(("http://", "https://")):
         raise HTTPException(status_code=400, detail="Invalid URL — must start with http:// or https://")
 
-    # Route LinkedIn URLs through the dedicated LinkedIn scraper
+    # Route LinkedIn profile URLs through the dedicated LinkedIn scraper
     if "linkedin.com/in/" in url:
         from services.linkedin_scraper import fetch_profile_text
         text = await fetch_profile_text(url)
@@ -267,67 +435,43 @@ async def fetch_jd_route(req: FetchJDRequest):
         "Upgrade-Insecure-Requests": "1",
     }
 
+    text = ""
+    title = ""
+    used_playwright = False
+
+    # ── Strategy 1: httpx (fast) ─────────────────────────────────────────────
     try:
         async with httpx.AsyncClient(follow_redirects=True, timeout=15) as client:
             response = await client.get(url, headers=headers)
             response.raise_for_status()
+            text, title = _extract_jd_text_from_html(response.text)
     except httpx.TimeoutException:
-        raise HTTPException(status_code=504, detail="Request timed out while fetching the URL.")
+        pass  # Will try Playwright below
     except httpx.HTTPStatusError as e:
-        raise HTTPException(status_code=502, detail=f"Remote server returned {e.response.status_code}.")
-    except Exception as e:
-        raise HTTPException(status_code=502, detail=f"Failed to fetch URL: {str(e)}")
+        if e.response.status_code in (403, 429, 503):
+            pass  # Likely bot-blocked — try Playwright
+        else:
+            raise HTTPException(status_code=502, detail=f"Remote server returned {e.response.status_code}.")
+    except Exception:
+        pass  # Try Playwright
 
-    soup = BeautifulSoup(response.text, "lxml")
+    # ── Strategy 2: Playwright fallback for JS-rendered pages ────────────────
+    # Deloitte, Naukri, LinkedIn jobs pages require JS rendering
+    needs_playwright = (
+        not text
+        or len(text.replace("\n", "").replace(" ", "")) < 500
+    )
+    js_heavy_domains = ["deloitte.com", "naukri.com", "linkedin.com/jobs", "workday.com", "greenhouse.io", "lever.co"]
+    if needs_playwright or any(d in url for d in js_heavy_domains):
+        from loguru import logger
+        logger.info(f"Falling back to Playwright for {url} (httpx text length: {len(text)})")
+        pw_text, pw_title = await _fetch_jd_with_playwright(url)
+        if pw_text and len(pw_text.replace("\n", "").replace(" ", "")) > len(text.replace("\n", "").replace(" ", "")):
+            text = pw_text
+            title = pw_title or title
+            used_playwright = True
 
-    # Remove script, style, nav, footer, header, and other non-content tags
-    for tag in soup(["script", "style", "nav", "footer", "header", "noscript", "aside", "meta", "link"]):
-        tag.decompose()
+    if not text:
+        raise HTTPException(status_code=422, detail="Could not extract job description from this URL. The page may require login or is heavily JS-rendered. Please paste the job description text manually.")
 
-    # Extract title
-    title = ""
-    if soup.title and soup.title.string:
-        title = soup.title.string.strip()
-
-    # Try to find the main content area with common job description selectors
-    main_content = None
-    for selector in [
-        "[class*='job-description']",
-        "[class*='jobDescription']",
-        "[class*='description']",
-        "[id*='job-description']",
-        "[id*='jobDescription']",
-        "article",
-        "main",
-        "[role='main']",
-    ]:
-        found = soup.select_one(selector)
-        if found:
-            main_content = found
-            break
-
-    if main_content:
-        text = main_content.get_text(separator="\n", strip=True)
-    else:
-        body = soup.find("body")
-        text = body.get_text(separator="\n", strip=True) if body else soup.get_text(separator="\n", strip=True)
-
-    # Clean up excessive blank lines
-    lines = [line.strip() for line in text.splitlines()]
-    cleaned_lines = []
-    prev_blank = False
-    for line in lines:
-        if line:
-            cleaned_lines.append(line)
-            prev_blank = False
-        elif not prev_blank:
-            cleaned_lines.append("")
-            prev_blank = True
-
-    text = "\n".join(cleaned_lines).strip()
-
-    # Truncate to a reasonable size (approx 8000 chars) to avoid overwhelming the AI
-    if len(text) > 8000:
-        text = text[:8000] + "\n\n[Content truncated...]"
-
-    return {"text": text, "title": title}
+    return {"text": text, "title": title, "used_playwright": used_playwright}

@@ -50,9 +50,33 @@ Response style:
 - Occasionally be witty — this is a stressful process and a bit of warmth helps"""
 
 
-async def route_intent(message: str, page_context: str, history: list[dict]) -> dict:
+def _build_user_profile_context(user_profile: dict | None) -> str:
+    """Build a user profile context string to prepend to the system prompt."""
+    if not user_profile or not user_profile.get("name"):
+        return ""
+    parts = [f"\n\n=== USER PROFILE ==="]
+    if user_profile.get("name"):
+        parts.append(f"Name: {user_profile['name']}")
+    if user_profile.get("currentRole"):
+        parts.append(f"Current Role: {user_profile['currentRole']}")
+    if user_profile.get("targetRole"):
+        parts.append(f"Target Role: {user_profile['targetRole']}")
+    if user_profile.get("yearsOfExperience"):
+        parts.append(f"Years of Experience: {user_profile['yearsOfExperience']}")
+    if user_profile.get("skills"):
+        parts.append(f"Skills: {', '.join(user_profile['skills'])}")
+    if user_profile.get("experienceSummary"):
+        parts.append(f"Experience Summary: {user_profile['experienceSummary']}")
+    parts.append(f"\nALWAYS address this user by their first name ({user_profile['name'].split()[0]}) in your responses.")
+    parts.append("Give advice specifically tailored to their background, current role, and target role.")
+    parts.append("=== END USER PROFILE ===")
+    return "\n".join(parts)
+
+
+async def route_intent(message: str, page_context: str, history: list[dict], user_profile: dict | None = None) -> dict:
     messages = [{"role": "user", "content": f"Current page: {page_context}\n\nUser message: {message}"}]
-    raw = await complete_claude_json(SYSTEM_ROUTER, messages)
+    system = SYSTEM_ROUTER + _build_user_profile_context(user_profile)
+    raw = await complete_claude_json(system, messages)
     try:
         return json.loads(raw)
     except Exception:
@@ -63,8 +87,9 @@ async def stream_response(
     message: str,
     page_context: str,
     history: list[dict],
+    user_profile: dict | None = None,
 ) -> AsyncIterator[str]:
-    system = SYSTEM_CHAT.format(page_context=page_context)
+    system = SYSTEM_CHAT.format(page_context=page_context) + _build_user_profile_context(user_profile)
     messages = history + [{"role": "user", "content": message}]
     async for chunk in stream_claude(system, messages):
         yield chunk

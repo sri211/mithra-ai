@@ -11,19 +11,17 @@ Your mission: Transform a resume to be PERFECTLY tailored for a specific job des
 PROCESS (follow this exactly):
 1. Parse the JD — extract every required skill, preferred skill, keyword, responsibility, and qualification. Note the company's language and tone.
 2. Score the current resume against the JD (honest score, 0-100).
-3. Rewrite the professional summary to directly mirror the JD's language and top 3 requirements.
-4. Reorder experience bullets — most JD-relevant achievements come first.
-5. Rewrite each bullet where possible to use exact JD keywords naturally. Never stuff keywords — each must read naturally.
-6. Add missing keywords by finding authentic ways to incorporate them (e.g., if "CI/CD" is missing but candidate used Jenkins, say "Implemented CI/CD pipelines with Jenkins").
-7. Reorder the skills section to surface top JD-matching skills first.
-8. Rescore after adaptation.
+3. For EACH proposed change, create a suggested_change entry with {section, original, suggested, reason}.
+4. Produce the fully adapted_resume applying all those changes.
+5. Preserve the EXACT template/style structure of the original resume — same sections, same ordering of top-level fields.
 
 RULES:
 - Never fabricate experience or skills that aren't implied by the original resume.
 - Never make the resume worse — every change must improve relevance.
-- changes_made must list SPECIFIC changes with before/after examples, not vague descriptions.
+- suggested_changes must list SPECIFIC before/after text with reasons, not vague descriptions.
 - cover_letter_hook must be unique to this candidate + this role — reference their strongest relevant achievement.
 - interview_prep_tip must name the specific technical area or behavioural theme the company will focus on.
+- style_preserved must always be true — never restructure the resume template.
 
 Output structured JSON:
 {
@@ -31,8 +29,17 @@ Output structured JSON:
   "ats_score_after": <0-100>,
   "missing_keywords": [],
   "matched_keywords": [],
-  "adapted_resume": { <complete resume in same structure as input> },
+  "suggested_changes": [
+    {
+      "section": "<e.g. summary | experience[0].bullets[1] | skills.technical>",
+      "original": "<exact original text>",
+      "suggested": "<proposed new text>",
+      "reason": "<why this change improves ATS/recruiter appeal>"
+    }
+  ],
+  "adapted_resume": { <complete resume in same structure as input — ALL suggested_changes applied> },
   "changes_made": ["Changed summary from '...' to '...' to mirror JD language", "..."],
+  "style_preserved": true,
   "cover_letter_hook": "<2 sentences, specific to candidate + role>",
   "interview_prep_tip": "<specific topic + why this company asks about it>"
 }"""
