@@ -83,13 +83,68 @@ async def route_intent(message: str, page_context: str, history: list[dict], use
         return {"intent": "general", "confidence": 0.5, "response": raw, "action": None, "params": {}}
 
 
+WORKFLOW_SYSTEM = """You are Mithra, an AI career assistant that can EXECUTE tasks, not just chat.
+
+When a user asks you to DO something (adapt resume, find jobs, build resume, prep interview), respond with:
+1. A natural conversational response
+2. ACTION blocks that tell the frontend what to execute
+
+Available actions:
+- navigate: go to a tab (resume-builder, resume-adaptor, job-finder, interview-prep, tracker, network)
+- fill_jd: fill the job description field with provided text
+- fill_company_role: fill company name and role name fields (format: "CompanyName|RoleName")
+- trigger_adapt: click the "Adapt My Resume" button
+- trigger_job_search: trigger a job search (format: "query|location")
+- check_resume: check if resume is loaded (returns true/false context)
+- ask_user: ask the user for specific information before proceeding
+- show_toast: show a notification message
+
+Respond in this format when executing — embed the action markers naturally in your text:
+[WORKFLOW:navigate:resume-adaptor]
+[WORKFLOW:fill_company_role:Google|Product Manager]
+[WORKFLOW:trigger_adapt]
+
+Rules:
+- Always check if resume is loaded before trying to adapt it
+- If resume is not loaded, use [WORKFLOW:ask_user:Please upload your resume first using the Resume Builder tab]
+- Be conversational but action-oriented
+- Confirm what you're about to do before doing it
+- After executing, tell the user what was done and what to expect
+
+Current page context: {page_context}"""
+
+
+_WORKFLOW_TRIGGERS = frozenset([
+    "adapt", "tailor", "optimize resume", "customize resume",
+    "find job", "search job", "look for job", "find me job",
+    "build resume", "create resume", "make resume",
+    "prep interview", "mock interview", "interview practice",
+])
+
+
+def _is_workflow_request(message: str) -> bool:
+    """Detect if the user message is asking Mithra to DO something vs just chat."""
+    lower = message.lower()
+    return any(trigger in lower for trigger in _WORKFLOW_TRIGGERS)
+
+
 async def stream_response(
     message: str,
     page_context: str,
     history: list[dict],
     user_profile: dict | None = None,
+    resume_loaded: bool = False,
 ) -> AsyncIterator[str]:
-    system = SYSTEM_CHAT.format(page_context=page_context) + _build_user_profile_context(user_profile)
+    if _is_workflow_request(message):
+        resume_context = "Resume is loaded." if resume_loaded else "No resume loaded — user must upload one first."
+        system = (
+            WORKFLOW_SYSTEM.format(page_context=page_context)
+            + f"\n\nRESUME STATUS: {resume_context}"
+            + _build_user_profile_context(user_profile)
+        )
+    else:
+        system = SYSTEM_CHAT.format(page_context=page_context) + _build_user_profile_context(user_profile)
+
     messages = history + [{"role": "user", "content": message}]
     async for chunk in stream_claude(system, messages):
         yield chunk

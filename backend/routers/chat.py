@@ -27,6 +27,7 @@ class ChatRequest(BaseModel):
     page_context: str = "dashboard"
     history: list[ChatMessage] = []
     user_profile: Optional[UserProfile] = None
+    resume_loaded: bool = False
 
 
 @router.post("/stream")
@@ -35,7 +36,7 @@ async def chat_stream(req: ChatRequest):
     profile = req.user_profile.model_dump() if req.user_profile else None
 
     async def generate():
-        async for chunk in stream_response(req.message, req.page_context, history, user_profile=profile):
+        async for chunk in stream_response(req.message, req.page_context, history, user_profile=profile, resume_loaded=req.resume_loaded):
             yield f"data: {json.dumps({'text': chunk})}\n\n"
         yield "data: [DONE]\n\n"
 

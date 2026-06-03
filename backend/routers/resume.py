@@ -53,6 +53,8 @@ class BulletRequest(BaseModel):
 class AdaptRequest(BaseModel):
     resume: dict
     jd_text: str
+    company_name: str = ""
+    role_name: str = ""
 
 
 class CoverLetterRequest(BaseModel):
@@ -107,7 +109,7 @@ async def enhance_bullet_route(req: BulletRequest):
 async def adapt_resume_route(req: AdaptRequest):
     try:
         jd_parsed = await parse_job_description(req.jd_text)
-        result = await adapt_resume(req.resume, req.jd_text, jd_parsed)
+        result = await adapt_resume(req.resume, req.jd_text, jd_parsed, company_name=req.company_name, role_name=req.role_name)
         return result
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))

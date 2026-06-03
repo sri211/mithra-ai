@@ -5,47 +5,63 @@ import json
 from loguru import logger
 from services.claude_service import complete_claude_json, complete_claude
 
-SYSTEM_ADAPTOR = """You are the world's best ATS optimization specialist and ex-senior recruiter at Google, Amazon, and McKinsey.
+SYSTEM_ADAPTOR = """You are an elite resume strategist who analyzes resumes from 5 distinct perspectives simultaneously:
 
-Your mission: Transform a resume to be PERFECTLY tailored for a specific job description — maximising both ATS keyword score and human recruiter appeal.
+1. ATS ALGORITHM LENS: Keyword density, section headers (must match exact JD terms), formatting compatibility, absence of tables/graphics/columns that confuse parsers, action verb strength.
 
-PROCESS (follow this exactly):
-1. Parse the JD — extract every required skill, preferred skill, keyword, responsibility, and qualification. Note the company's language and tone.
-2. Score the current resume against the JD (honest score, 0-100).
-3. For EACH proposed change, create a suggested_change entry with {section, original, suggested, reason}.
-4. Produce the fully adapted_resume applying all those changes.
-5. Preserve the EXACT template/style structure of the original resume — same sections, same ordering of top-level fields.
+2. HR SCREENER LENS (30-second scan): Does the title/summary immediately signal relevance? Is the most recent role clearly aligned? Are there obvious gaps or red flags? Does the progression make sense?
 
-RULES:
-- Never fabricate experience or skills that aren't implied by the original resume.
-- Never make the resume worse — every change must improve relevance.
-- The `original` field in each suggested change MUST be copied VERBATIM from the resume field provided in the prompt. NEVER invent, hallucinate, or paraphrase the original text. Copy it exactly as given in the "ACTUAL CURRENT ..." sections below.
-- Only suggest changes to sections that are genuinely relevant to this specific JD. If the candidate is an HR/MBA professional applying for an HR role, do NOT suggest adding software engineering, distributed systems, or coding skills that are not in their background.
-- suggested_changes must list SPECIFIC before/after text with reasons, not vague descriptions.
-- cover_letter_hook must be unique to this candidate + this role — reference their strongest relevant achievement.
-- interview_prep_tip must name the specific technical area or behavioural theme the company will focus on.
-- style_preserved must always be true — never restructure the resume template.
+3. HIRING MANAGER LENS: Quality of achievements — are bullets outcome-driven with metrics? Does experience depth match the seniority required? Are responsibilities described in terms of business impact, not just tasks?
 
-Output structured JSON:
+4. DOMAIN EXPERT LENS: Are the right tools, methodologies, certifications, and domain-specific terminology present? Does the candidate speak the language of the field?
+
+5. CULTURAL FIT LENS: Does the language align with the target company's values? Are there signals of traits the company prizes (e.g., ownership, scale, speed, collaboration)?
+
+CORE RULES:
+- The `original` field in each suggested_change MUST be copied VERBATIM from the "ACTUAL CURRENT ..." sections provided. NEVER invent the original text.
+- Only suggest changes that match the candidate's ACTUAL background. An HR professional should get HR-optimized changes, not software engineering suggestions.
+- Every suggested change must specify WHICH LENS it addresses (e.g., "ATS: Add keyword 'Talent Acquisition' which appears 4x in JD")
+- Never fabricate skills or experience not implied by the original resume.
+- Produce 4-8 highly targeted changes, not 20 generic ones.
+- style_preserved: always true.
+
+Output JSON:
 {
   "ats_score_before": <0-100>,
   "ats_score_after": <0-100>,
+  "perspective_scores": {
+    "ats": <0-100>, "hr_screener": <0-100>, "hiring_manager": <0-100>,
+    "domain_expert": <0-100>, "cultural_fit": <0-100>
+  },
   "missing_keywords": [],
   "matched_keywords": [],
   "suggested_changes": [
     {
-      "section": "<e.g. summary | experience[0].bullets[1] | skills.technical>",
-      "original": "<exact original text>",
-      "suggested": "<proposed new text>",
-      "reason": "<why this change improves ATS/recruiter appeal>"
+      "section": "<summary | experience[0].bullets[1] | skills.technical | etc.>",
+      "lens": "<ATS | HR Screener | Hiring Manager | Domain Expert | Cultural Fit>",
+      "original": "<VERBATIM from ACTUAL CURRENT sections>",
+      "suggested": "<specific rewrite>",
+      "reason": "<why this change, which lens it addresses, what metric it improves>"
     }
   ],
-  "adapted_resume": { <complete resume in same structure as input — ALL suggested_changes applied> },
-  "changes_made": ["Changed summary from '...' to '...' to mirror JD language", "..."],
+  "adapted_resume": { <complete resume JSON with all changes applied> },
+  "changes_made": [],
   "style_preserved": true,
-  "cover_letter_hook": "<2 sentences, specific to candidate + role>",
-  "interview_prep_tip": "<specific topic + why this company asks about it>"
+  "cover_letter_hook": "<2 sentences specific to this candidate + role>",
+  "interview_prep_tip": "<specific topic + reason>"
 }"""
+
+SYSTEM_COMPANY_INTELLIGENCE = """You are a talent intelligence expert with deep knowledge of how top companies hire.
+Given a company name and role, produce a structured company hiring intelligence report covering:
+1. Company Culture & Values - what they genuinely care about (cite specific known values e.g. Amazon's LPs, Google's "Googleyness")
+2. Resume Screening Approach - how their ATS and HR team evaluates resumes for this role level
+3. Keywords That Matter - specific terms, frameworks, tools they use internally or value
+4. What Gets You Past Round 1 - specific patterns in successful candidates
+5. Red Flags They Screen For - what immediately disqualifies candidates
+6. Impact Metrics They Love - specific types of numbers/outcomes that impress them
+7. Cultural Fit Signals - how they spot alignment through resume language
+
+Be specific. If it's Flipkart say "Flipkart values 'Bias for Action' and 'Customer Obsession', prefers candidates who show GMV/revenue impact numbers, looks for category management + P&L ownership evidence." Not generic platitudes."""
 
 SYSTEM_JD_PARSER = """Extract the following from this job description as JSON:
 {
@@ -70,7 +86,14 @@ async def parse_job_description(jd_text: str) -> dict:
     return json.loads(raw)
 
 
-async def adapt_resume(resume: dict, jd_text: str, jd_parsed: dict) -> dict:
+async def get_company_intelligence(company: str, role: str) -> str:
+    """Fetch deep hiring intelligence for a specific company and role."""
+    content = f"Company: {company}\nRole: {role}\n\nProvide the structured company hiring intelligence report."
+    messages = [{"role": "user", "content": content}]
+    return await complete_claude(SYSTEM_COMPANY_INTELLIGENCE, messages, max_tokens=1200)
+
+
+async def adapt_resume(resume: dict, jd_text: str, jd_parsed: dict, company_name: str = "", role_name: str = "") -> dict:
     # Extract literal section texts so Claude cannot hallucinate the "original" values
     personal = resume.get("personal", {})
     summary_text = resume.get("summary", "")
@@ -100,12 +123,22 @@ ACTUAL CURRENT EXPERIENCE:
 {"".join(experience_texts)}
 """
 
+    # Build company intelligence block if company context provided
+    company_intel_block = ""
+    if company_name and company_name.strip():
+        target_role = role_name.strip() if role_name else jd_parsed.get("title", "the role")
+        try:
+            intelligence = await get_company_intelligence(company_name.strip(), target_role)
+            company_intel_block = f"\nCOMPANY INTELLIGENCE FOR {company_name.strip()} - {target_role}:\n{intelligence}\n"
+        except Exception as e:
+            logger.warning(f"Company intelligence fetch failed for {company_name}: {e}")
+
     content = f"""JOB DESCRIPTION:
 {jd_text}
 
 PARSED JD:
 {json.dumps(jd_parsed, indent=2)}
-
+{company_intel_block}
 CURRENT RESUME (full JSON):
 {json.dumps(resume, indent=2)}
 {verbatim_section}
