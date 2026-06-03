@@ -68,62 +68,59 @@ def build_linkedin_search_url(name: str, role: str, company: str) -> str:
     return f"https://www.linkedin.com/search/results/people/?keywords={encoded}&origin=GLOBAL_SEARCH_HEADER"
 
 
-async def bing_search_linkedin_profiles(role: str, company: str) -> list[dict]:
+async def search_linkedin_profiles(role: str, company: str) -> list[dict]:
     """
-    Use Bing to find REAL LinkedIn profiles (Bing is more permissive than Google for servers).
-    Returns list of {name, linkedin_url, role_snippet, snippet}.
+    Search for real LinkedIn profiles using DuckDuckGo HTML (most permissive for servers).
+    Falls back to constructing name-based LinkedIn search URLs.
+    Returns list of {name, linkedin_url, role_snippet}.
     """
     from bs4 import BeautifulSoup
     HEADERS = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "User-Agent": "Mozilla/5.0 (X11; Linux x86_64; rv:109.0) Gecko/20100101 Firefox/119.0",
+        "Accept": "text/html,application/xhtml+xml",
         "Accept-Language": "en-US,en;q=0.5",
     }
-    queries = [
-        f'site:linkedin.com/in "{company}" "{role}"',
-        f'site:linkedin.com/in "{company}" {role}',
-    ]
     profiles = []
     seen_urls = set()
+
+    # Try DuckDuckGo HTML search (no JS required, less blocking)
+    queries = [
+        f'"{company}" "{role}" site:linkedin.com/in',
+        f'"{company}" {role} linkedin.com/in',
+    ]
     async with httpx.AsyncClient(headers=HEADERS, follow_redirects=True, timeout=15) as client:
         for q in queries:
-            if len(profiles) >= 8:
+            if len(profiles) >= 6:
                 break
             try:
-                url = f"https://www.bing.com/search?q={urllib.parse.quote(q)}&count=10"
-                r = await client.get(url)
+                encoded_q = urllib.parse.quote(q)
+                r = await client.get(f"https://html.duckduckgo.com/html/?q={encoded_q}")
                 if r.status_code != 200:
-                    logger.warning(f"Bing returned {r.status_code} for: {q}")
                     continue
                 soup = BeautifulSoup(r.text, "html.parser")
-                for li in soup.select("li.b_algo"):
-                    a = li.find("a", href=True)
-                    h2 = li.find("h2")
-                    snippet_el = li.find("p") or li.find("div", class_="b_caption")
-                    if not (a and h2):
-                        continue
-                    href = a["href"]
+                # DuckDuckGo HTML result links
+                for a in soup.find_all("a", class_="result__a") or soup.find_all("a", href=True):
+                    href = a.get("href", "")
+                    # DDG wraps URLs in redirect: extract actual URL
+                    if "uddg=" in href:
+                        href = urllib.parse.unquote(href.split("uddg=")[1].split("&")[0])
                     if "linkedin.com/in/" not in href:
                         continue
-                    if href in seen_urls:
+                    # Clean to base profile URL
+                    base = href.split("?")[0].rstrip("/")
+                    if base in seen_urls:
                         continue
-                    seen_urls.add(href)
-                    title_text = h2.get_text(strip=True)
-                    name = title_text.split(" - ")[0].split(" | ")[0].split(" – ")[0].strip()
+                    seen_urls.add(base)
+                    title = a.get_text(strip=True)
+                    name = title.split(" - ")[0].split(" | ")[0].split(" – ")[0].strip()
                     role_snippet = ""
-                    if " - " in title_text:
-                        role_snippet = title_text.split(" - ", 1)[1].split(" | ")[0].strip()
-                    elif " – " in title_text:
-                        role_snippet = title_text.split(" – ", 1)[1].split(" | ")[0].strip()
-                    profiles.append({
-                        "name": name,
-                        "linkedin_url": href,
-                        "role_snippet": role_snippet,
-                        "snippet": snippet_el.get_text(strip=True) if snippet_el else "",
-                    })
+                    if " - " in title:
+                        role_snippet = title.split(" - ", 1)[1].split(" | ")[0].strip()
+                    profiles.append({"name": name, "linkedin_url": base, "role_snippet": role_snippet})
             except Exception as e:
-                logger.warning(f"Bing LinkedIn search failed for '{q}': {e}")
-    logger.info(f"Bing found {len(profiles)} LinkedIn profiles for {role} at {company}")
+                logger.warning(f"DDG search failed for '{q}': {e}")
+
+    logger.info(f"DDG found {len(profiles)} LinkedIn profiles for {role} at {company}")
     return profiles[:8]
 
 
@@ -139,7 +136,7 @@ async def find_people_from_hunter(company_domain: str) -> list[dict]:
         async with httpx.AsyncClient(timeout=15) as client:
             r = await client.get(
                 "https://api.hunter.io/v2/domain-search",
-                params={"domain": company_domain, "api_key": key, "limit": 20}
+                params={"domain": company_domain, "api_key": key, "limit": 10}
             )
         if r.status_code == 200:
             data = r.json().get("data", {})
@@ -256,10 +253,10 @@ async def find_connections(company: str, target_role: str, user_profile: dict) -
     # Step 1a: PRIMARY — Hunter.io real people with verified emails
     hunter_people = await find_people_from_hunter(domain)
 
-    # Step 1b: SECONDARY — Bing search for LinkedIn profiles
-    bing_profiles = await bing_search_linkedin_profiles(target_role, company)
+    # Step 1b: SECONDARY — search for LinkedIn profiles via DuckDuckGo
+    bing_profiles = await search_linkedin_profiles(target_role, company)
 
-    # Merge: prefer Hunter.io people (have real emails), enrich with Bing LinkedIn URLs
+    # Merge: prefer Hunter.io people (have real emails), enrich with LinkedIn URLs
     bing_name_map = {p["name"].lower(): p for p in bing_profiles}
     real_profiles = []
 
@@ -289,7 +286,7 @@ async def find_connections(company: str, target_role: str, user_profile: dict) -
                 "source": "bing",
             })
 
-    logger.info(f"Total real profiles: {len(real_profiles)} (Hunter: {len(hunter_people)}, Bing: {len(bing_profiles)})")
+    logger.info(f"Total real profiles: {len(real_profiles)} (Hunter: {len(hunter_people)}, DDG: {len(bing_profiles)})")
 
     # Step 2: If we found real profiles, enrich them with Claude
     if real_profiles:
@@ -297,7 +294,7 @@ async def find_connections(company: str, target_role: str, user_profile: dict) -
             f"Company: {company}\n"
             f"Target Role: {target_role}\n"
             f"User Profile: {json.dumps(user_profile) if user_profile else 'job seeker'}\n\n"
-            f"Real people found at {company} (via Hunter.io verified emails + Bing LinkedIn search):\n"
+            f"Real people found at {company} (via Hunter.io verified emails + DuckDuckGo LinkedIn search):\n"
             f"{json.dumps(real_profiles, indent=2)}\n\n"
             f"Enrich these REAL people with connection type, outreach messages, and reasons to connect. "
             f"Also suggest 2-3 additional role types to search for at {company}."
