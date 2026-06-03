@@ -2,6 +2,7 @@
 Resume Adaptor Agent — tailors resume to a specific job description.
 """
 import json
+from loguru import logger
 from services.claude_service import complete_claude_json, complete_claude
 
 SYSTEM_ADAPTOR = """You are the world's best ATS optimization specialist and ex-senior recruiter at Google, Amazon, and McKinsey.
@@ -112,8 +113,12 @@ Adapt this resume to maximize ATS score and interview chances for this specific 
 REMINDER: The `original` field in every suggested_change must be copied VERBATIM from the "ACTUAL CURRENT ..." lines above."""
 
     messages = [{"role": "user", "content": content}]
-    raw = await complete_claude_json(SYSTEM_ADAPTOR, messages)
-    return json.loads(raw)
+    raw = await complete_claude_json(SYSTEM_ADAPTOR, messages, max_tokens=8192)
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError as e:
+        logger.error(f"Adaptor JSON parse failed: {e} | Raw start: {raw[:300]}")
+        raise ValueError(f"AI returned malformed response. Please try again. ({e})")
 
 
 async def generate_cover_letter(resume: dict, jd_text: str, tone: str = "professional") -> str:
