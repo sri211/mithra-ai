@@ -68,52 +68,47 @@ def build_linkedin_search_url(name: str, role: str, company: str) -> str:
     return f"https://www.linkedin.com/search/results/people/?keywords={encoded}&origin=GLOBAL_SEARCH_HEADER"
 
 
-async def google_search_linkedin_profiles(role: str, company: str) -> list[dict]:
+async def bing_search_linkedin_profiles(role: str, company: str) -> list[dict]:
     """
-    Use Google to find REAL LinkedIn profiles for people in a given role at a company.
-    Returns list of {name, linkedin_url, snippet, title}.
+    Use Bing to find REAL LinkedIn profiles (Bing is more permissive than Google for servers).
+    Returns list of {name, linkedin_url, role_snippet, snippet}.
     """
+    from bs4 import BeautifulSoup
     HEADERS = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-        "Accept": "text/html,application/xhtml+xml",
-        "Accept-Language": "en-US,en;q=0.9",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.5",
     }
-    # Search for the role type broadly, and also for common related roles
-    role_queries = [
+    queries = [
         f'site:linkedin.com/in "{company}" "{role}"',
         f'site:linkedin.com/in "{company}" {role}',
     ]
     profiles = []
     seen_urls = set()
-
     async with httpx.AsyncClient(headers=HEADERS, follow_redirects=True, timeout=15) as client:
-        for q in role_queries:
+        for q in queries:
             if len(profiles) >= 8:
                 break
             try:
-                url = f"https://www.google.com/search?q={urllib.parse.quote(q)}&num=8"
+                url = f"https://www.bing.com/search?q={urllib.parse.quote(q)}&count=10"
                 r = await client.get(url)
                 if r.status_code != 200:
+                    logger.warning(f"Bing returned {r.status_code} for: {q}")
                     continue
-                from bs4 import BeautifulSoup
                 soup = BeautifulSoup(r.text, "html.parser")
-                for g in soup.select("div.g, div[data-sokoban-container]"):
-                    a = g.find("a", href=True)
-                    h3 = g.find("h3")
-                    snippet_el = g.find("div", class_=lambda c: c and "VwiC3b" in c)
-                    if not (a and h3):
+                for li in soup.select("li.b_algo"):
+                    a = li.find("a", href=True)
+                    h2 = li.find("h2")
+                    snippet_el = li.find("p") or li.find("div", class_="b_caption")
+                    if not (a and h2):
                         continue
                     href = a["href"]
                     if "linkedin.com/in/" not in href:
                         continue
-                    # Clean URL
-                    if href.startswith("/url?q="):
-                        href = urllib.parse.unquote(href.split("/url?q=")[1].split("&")[0])
                     if href in seen_urls:
                         continue
                     seen_urls.add(href)
-                    title_text = h3.get_text(strip=True)
-                    # Extract name from title: "Name - Role at Company | LinkedIn"
+                    title_text = h2.get_text(strip=True)
                     name = title_text.split(" - ")[0].split(" | ")[0].split(" – ")[0].strip()
                     role_snippet = ""
                     if " - " in title_text:
@@ -127,32 +122,60 @@ async def google_search_linkedin_profiles(role: str, company: str) -> list[dict]
                         "snippet": snippet_el.get_text(strip=True) if snippet_el else "",
                     })
             except Exception as e:
-                logger.warning(f"Google LinkedIn search failed for '{q}': {e}")
+                logger.warning(f"Bing LinkedIn search failed for '{q}': {e}")
+    logger.info(f"Bing found {len(profiles)} LinkedIn profiles for {role} at {company}")
     return profiles[:8]
 
 
-async def find_company_emails_hunter(company_domain: str) -> list[dict]:
-    """Use Hunter.io to find real professional email addresses for a company domain."""
+async def find_people_from_hunter(company_domain: str) -> list[dict]:
+    """
+    Use Hunter.io domain search to find REAL people with verified emails at a company.
+    Returns list of {name, email, position, linkedin_url}.
+    """
     key = os.getenv("HUNTER_API_KEY", "")
     if not key:
         return []
     try:
-        async with httpx.AsyncClient(timeout=10) as client:
+        async with httpx.AsyncClient(timeout=15) as client:
             r = await client.get(
-                f"https://api.hunter.io/v2/domain-search",
-                params={"domain": company_domain, "api_key": key, "limit": 15, "type": "personal"}
+                "https://api.hunter.io/v2/domain-search",
+                params={"domain": company_domain, "api_key": key, "limit": 20}
             )
         if r.status_code == 200:
-            emails = r.json().get("data", {}).get("emails", [])
-            return [{"email": e["value"], "first": e.get("first_name", ""), "last": e.get("last_name", ""), "position": e.get("position", "")} for e in emails if e.get("value")]
+            data = r.json().get("data", {})
+            emails = data.get("emails", [])
+            people = []
+            for e in emails:
+                if not e.get("value"):
+                    continue
+                first = e.get("first_name", "")
+                last = e.get("last_name", "")
+                name = f"{first} {last}".strip()
+                if not name:
+                    continue
+                # Build LinkedIn search URL for this specific person
+                linkedin_search = build_linkedin_search_url(name, e.get("position", ""), company_domain.split(".")[0])
+                people.append({
+                    "name": name,
+                    "email": e["value"],
+                    "position": e.get("position", ""),
+                    "linkedin_search": linkedin_search,
+                    "verified": e.get("verification", {}).get("status") == "valid",
+                    "confidence": e.get("confidence", 0),
+                    "source": "hunter",
+                })
+            # Sort by confidence score
+            people.sort(key=lambda x: x["confidence"], reverse=True)
+            logger.info(f"Hunter.io found {len(people)} real people at {company_domain}")
+            return people[:15]
     except Exception as e:
         logger.warning(f"Hunter.io failed for {company_domain}: {e}")
     return []
 
 
 def get_company_domain(company: str) -> str:
-    """Best-guess company email domain."""
-    domains = {
+    """Best-guess company email domain — strips geographic/legal suffixes."""
+    KNOWN = {
         "google": "google.com", "microsoft": "microsoft.com", "amazon": "amazon.com",
         "flipkart": "flipkart.com", "swiggy": "swiggy.in", "zomato": "zomato.com",
         "razorpay": "razorpay.com", "cred": "cred.club", "phonepe": "phonepe.com",
@@ -160,12 +183,33 @@ def get_company_domain(company: str) -> str:
         "infosys": "infosys.com", "wipro": "wipro.com", "tcs": "tcs.com",
         "netflix": "netflix.com", "meta": "meta.com", "apple": "apple.com",
         "uber": "uber.com", "ola": "olacabs.com", "myntra": "myntra.com",
+        "glanbia": "glanbia.com", "deloitte": "deloitte.com", "pwc": "pwc.com",
+        "mckinsey": "mckinsey.com", "bcg": "bcg.com", "accenture": "accenture.com",
+        "nestle": "nestle.com", "unilever": "unilever.com", "hul": "unilever.com",
+        "marico": "marico.com", "dabur": "dabur.com", "godrej": "godrej.com",
+        "reliance": "ril.com", "tata": "tata.com", "mahindra": "mahindra.com",
+        "hcl": "hcltech.com", "tech mahindra": "techmahindra.com",
     }
-    key = company.lower().replace(" ", "")
-    for k, v in domains.items():
-        if k in key:
-            return v
-    return company.lower().replace(" ", "") + ".com"
+    # Strip common geographic/legal suffixes before lookup
+    STRIP_WORDS = [
+        " india", " india pvt", " india ltd", " india limited", " pvt ltd",
+        " private limited", " limited", " ltd", " inc", " corp", " group",
+        " holdings", " global", " international", " asia", " apac",
+        " south asia", " & co", " llp", " llc",
+    ]
+    clean = company.lower()
+    for sw in STRIP_WORDS:
+        clean = clean.replace(sw, "")
+    clean = clean.strip()
+
+    # Check known domains first (on original and stripped)
+    for key_company, domain in KNOWN.items():
+        if key_company in clean or key_company in company.lower():
+            return domain
+
+    # Fall back: use the stripped company name as domain
+    clean_slug = clean.replace(" ", "").replace(".", "").replace(",", "")
+    return f"{clean_slug}.com"
 
 
 COLORS = ["#7c3aed", "#06b6d4", "#10b981", "#f59e0b", "#ec4899", "#6366f1", "#ef4444", "#8b5cf6", "#14b8a6", "#f97316"]
@@ -207,14 +251,45 @@ Output JSON:
 
 async def find_connections(company: str, target_role: str, user_profile: dict) -> dict:
     domain = get_company_domain(company)
+    logger.info(f"Network search: company={company}, domain={domain}, role={target_role}")
 
-    # Step 1: Find REAL people via Google LinkedIn search
-    real_profiles = await google_search_linkedin_profiles(target_role, company)
-    logger.info(f"Google found {len(real_profiles)} real LinkedIn profiles for {target_role} at {company}")
+    # Step 1a: PRIMARY — Hunter.io real people with verified emails
+    hunter_people = await find_people_from_hunter(domain)
 
-    # Also get real emails from Hunter.io if key available
-    hunter_emails = await find_company_emails_hunter(domain)
-    email_map = {f"{e['first']} {e['last']}".strip().lower(): e["email"] for e in hunter_emails if e.get("email")}
+    # Step 1b: SECONDARY — Bing search for LinkedIn profiles
+    bing_profiles = await bing_search_linkedin_profiles(target_role, company)
+
+    # Merge: prefer Hunter.io people (have real emails), enrich with Bing LinkedIn URLs
+    bing_name_map = {p["name"].lower(): p for p in bing_profiles}
+    real_profiles = []
+
+    # Add Hunter.io people first (real verified emails)
+    for p in hunter_people:
+        name_lower = p["name"].lower()
+        bing_match = bing_name_map.get(name_lower)
+        real_profiles.append({
+            "name": p["name"],
+            "linkedin_url": bing_match["linkedin_url"] if bing_match else build_linkedin_search_url(p["name"], p.get("position", target_role), company),
+            "role_snippet": p.get("position", ""),
+            "email": p["email"],
+            "email_verified": p.get("verified", False),
+            "source": "hunter",
+        })
+
+    # Add Bing-only profiles (no Hunter match)
+    hunter_names = {p["name"].lower() for p in hunter_people}
+    for p in bing_profiles:
+        if p["name"].lower() not in hunter_names:
+            real_profiles.append({
+                "name": p["name"],
+                "linkedin_url": p["linkedin_url"],
+                "role_snippet": p.get("role_snippet", ""),
+                "email": None,
+                "email_verified": False,
+                "source": "bing",
+            })
+
+    logger.info(f"Total real profiles: {len(real_profiles)} (Hunter: {len(hunter_people)}, Bing: {len(bing_profiles)})")
 
     # Step 2: If we found real profiles, enrich them with Claude
     if real_profiles:
@@ -222,9 +297,9 @@ async def find_connections(company: str, target_role: str, user_profile: dict) -
             f"Company: {company}\n"
             f"Target Role: {target_role}\n"
             f"User Profile: {json.dumps(user_profile) if user_profile else 'job seeker'}\n\n"
-            f"Real LinkedIn profiles found via Google search:\n"
+            f"Real people found at {company} (via Hunter.io verified emails + Bing LinkedIn search):\n"
             f"{json.dumps(real_profiles, indent=2)}\n\n"
-            f"Enrich these REAL people with connection type, outreach messages, and reasons. "
+            f"Enrich these REAL people with connection type, outreach messages, and reasons to connect. "
             f"Also suggest 2-3 additional role types to search for at {company}."
         )
         try:
@@ -234,18 +309,22 @@ async def find_connections(company: str, target_role: str, user_profile: dict) -
             additional = enriched_data.get("additional_searches", [])
             company_insights = enriched_data.get("company_insights", {})
 
+            # Build email lookup from real_profiles
+            real_email_map = {p["name"].lower(): p for p in real_profiles}
+
             connections = []
             for i, person in enumerate(enriched):
                 name = person.get("name", "")
                 linkedin_url = person.get("linkedin_url", "")
-                # Try to find real email from Hunter
-                real_email = email_map.get(name.lower())
-                email_display = real_email or f"{name.lower().replace(' ', '.').split()[0] if name else 'contact'}@{domain} (likely)"
+                # Get real email from our Hunter.io source
+                source_data = real_email_map.get(name.lower(), {})
+                real_email = source_data.get("email")
+                email_verified = source_data.get("email_verified", False)
 
                 connections.append({
                     "id": f"conn_{i+1:03d}",
                     "name": name,
-                    "role": person.get("role", target_role),
+                    "role": person.get("role", source_data.get("role_snippet", target_role)),
                     "company": company,
                     "avatar": "".join(p[0] for p in name.split()[:2]).upper() if name else "??",
                     "color": COLORS[i % len(COLORS)],
@@ -255,9 +334,10 @@ async def find_connections(company: str, target_role: str, user_profile: dict) -
                     "draft": person.get("draft", ""),
                     "linkedin_url": linkedin_url,
                     "linkedin_search": linkedin_url or build_linkedin_search_url(name, person.get("role", target_role), company),
-                    "email_pattern": real_email or email_display,
-                    "email_verified": bool(real_email),
+                    "email_pattern": real_email or f"<firstname>.<lastname>@{domain}",
+                    "email_verified": email_verified,
                     "is_real": True,
+                    "source": source_data.get("source", "bing"),
                 })
 
             # Add search suggestion cards for additional roles
