@@ -133,6 +133,20 @@ ACTUAL CURRENT EXPERIENCE:
         except Exception as e:
             logger.warning(f"Company intelligence fetch failed for {company_name}: {e}")
 
+    # Capture exact top-level structure of source resume for strict preservation
+    source_keys = list(resume.keys())
+    source_structure_note = f"""
+STRICT STRUCTURE RULES — MANDATORY:
+- The `adapted_resume` field MUST contain ALL and ONLY these top-level keys in this exact order: {source_keys}
+- Do NOT add any new top-level keys (no 'references', 'hobbies', 'certifications' at top level unless already present)
+- Do NOT remove any existing top-level keys
+- Do NOT reorder top-level keys
+- Do NOT change the schema of nested objects (if 'skills' has keys {list(resume.get('skills', {}).keys())}, keep exactly those keys)
+- Do NOT change section names or heading styles
+- ONLY modify text VALUES within existing fields — change bullet text, summary text, skill keywords
+- If a section exists in the source but has no relevant changes for the JD, keep it exactly as-is
+"""
+
     content = f"""JOB DESCRIPTION:
 {jd_text}
 
@@ -142,6 +156,7 @@ PARSED JD:
 CURRENT RESUME (full JSON):
 {json.dumps(resume, indent=2)}
 {verbatim_section}
+{source_structure_note}
 Adapt this resume to maximize ATS score and interview chances for this specific role.
 REMINDER: The `original` field in every suggested_change must be copied VERBATIM from the "ACTUAL CURRENT ..." lines above."""
 

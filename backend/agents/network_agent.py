@@ -1,7 +1,12 @@
 """
-Network Intelligence Agent — finds valuable connections at target companies via Claude.
+Network Intelligence Agent — finds real connections at target companies.
+Uses Google search to find actual LinkedIn profiles, then enriches with Claude-drafted outreach.
 """
 import json
+import os
+import urllib.parse
+import httpx
+from loguru import logger
 from services.claude_service import complete_claude_json, complete_claude
 
 SYSTEM_NETWORK = """You are a world-class networking strategist and talent intelligence expert.
@@ -54,11 +59,95 @@ Professional but human. No desperation, no copy-paste feel."""
 
 
 def build_linkedin_search_url(name: str, role: str, company: str) -> str:
-    """Build a real LinkedIn people search URL."""
-    import urllib.parse
-    query = f"{role} {company}".strip()
+    """Build a LinkedIn people search URL for a specific name+company."""
+    if name and name not in ("Unknown", ""):
+        query = f"{name} {company}".strip()
+    else:
+        query = f"{role} {company}".strip()
     encoded = urllib.parse.quote(query)
     return f"https://www.linkedin.com/search/results/people/?keywords={encoded}&origin=GLOBAL_SEARCH_HEADER"
+
+
+async def google_search_linkedin_profiles(role: str, company: str) -> list[dict]:
+    """
+    Use Google to find REAL LinkedIn profiles for people in a given role at a company.
+    Returns list of {name, linkedin_url, snippet, title}.
+    """
+    HEADERS = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml",
+        "Accept-Language": "en-US,en;q=0.9",
+    }
+    # Search for the role type broadly, and also for common related roles
+    role_queries = [
+        f'site:linkedin.com/in "{company}" "{role}"',
+        f'site:linkedin.com/in "{company}" {role}',
+    ]
+    profiles = []
+    seen_urls = set()
+
+    async with httpx.AsyncClient(headers=HEADERS, follow_redirects=True, timeout=15) as client:
+        for q in role_queries:
+            if len(profiles) >= 8:
+                break
+            try:
+                url = f"https://www.google.com/search?q={urllib.parse.quote(q)}&num=8"
+                r = await client.get(url)
+                if r.status_code != 200:
+                    continue
+                from bs4 import BeautifulSoup
+                soup = BeautifulSoup(r.text, "html.parser")
+                for g in soup.select("div.g, div[data-sokoban-container]"):
+                    a = g.find("a", href=True)
+                    h3 = g.find("h3")
+                    snippet_el = g.find("div", class_=lambda c: c and "VwiC3b" in c)
+                    if not (a and h3):
+                        continue
+                    href = a["href"]
+                    if "linkedin.com/in/" not in href:
+                        continue
+                    # Clean URL
+                    if href.startswith("/url?q="):
+                        href = urllib.parse.unquote(href.split("/url?q=")[1].split("&")[0])
+                    if href in seen_urls:
+                        continue
+                    seen_urls.add(href)
+                    title_text = h3.get_text(strip=True)
+                    # Extract name from title: "Name - Role at Company | LinkedIn"
+                    name = title_text.split(" - ")[0].split(" | ")[0].split(" – ")[0].strip()
+                    role_snippet = ""
+                    if " - " in title_text:
+                        role_snippet = title_text.split(" - ", 1)[1].split(" | ")[0].strip()
+                    elif " – " in title_text:
+                        role_snippet = title_text.split(" – ", 1)[1].split(" | ")[0].strip()
+                    profiles.append({
+                        "name": name,
+                        "linkedin_url": href,
+                        "role_snippet": role_snippet,
+                        "snippet": snippet_el.get_text(strip=True) if snippet_el else "",
+                    })
+            except Exception as e:
+                logger.warning(f"Google LinkedIn search failed for '{q}': {e}")
+    return profiles[:8]
+
+
+async def find_company_emails_hunter(company_domain: str) -> list[dict]:
+    """Use Hunter.io to find real professional email addresses for a company domain."""
+    key = os.getenv("HUNTER_API_KEY", "")
+    if not key:
+        return []
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            r = await client.get(
+                f"https://api.hunter.io/v2/domain-search",
+                params={"domain": company_domain, "api_key": key, "limit": 15, "type": "personal"}
+            )
+        if r.status_code == 200:
+            emails = r.json().get("data", {}).get("emails", [])
+            return [{"email": e["value"], "first": e.get("first_name", ""), "last": e.get("last_name", ""), "position": e.get("position", "")} for e in emails if e.get("value")]
+    except Exception as e:
+        logger.warning(f"Hunter.io failed for {company_domain}: {e}")
+    return []
 
 
 def get_company_domain(company: str) -> str:
@@ -82,103 +171,174 @@ def get_company_domain(company: str) -> str:
 COLORS = ["#7c3aed", "#06b6d4", "#10b981", "#f59e0b", "#ec4899", "#6366f1", "#ef4444", "#8b5cf6", "#14b8a6", "#f97316"]
 
 
-async def find_connections(company: str, target_role: str, user_profile: dict) -> dict:
-    content = (
-        f"Target Company: {company}\n"
-        f"Target Role: {target_role}\n"
-        f"User Profile: {json.dumps(user_profile) if user_profile else 'Not provided'}\n\n"
-        f"Generate 10 realistic, diverse connections I should reach out to at {company} "
-        f"for a {target_role} role. Include hiring managers, recruiters, team members, "
-        f"alumni, and influencers. Make the LinkedIn search URLs specific to the role and company."
-    )
-    messages = [{"role": "user", "content": content}]
-    try:
-        raw = await complete_claude_json(SYSTEM_NETWORK, messages, max_tokens=4096)
-        # Extract JSON robustly
-        import re
-        raw = raw.strip()
-        for pat in [r"```json\s*([\s\S]*?)\s*```", r"```\s*([\s\S]*?)\s*```"]:
-            m = re.search(pat, raw)
-            if m:
-                raw = m.group(1).strip()
-                break
-        result = json.loads(raw)
-        conns = result.get("connections", [])
-        if conns and len(conns) >= 3 and all(c.get("name") for c in conns):
-            domain = get_company_domain(company)
-            for i, c in enumerate(conns):
-                # Ensure avatar is initials
-                if not c.get("avatar"):
-                    parts = c.get("name", "XX").split()
-                    c["avatar"] = "".join(p[0] for p in parts[:2]).upper()
-                # Ensure color
-                if not c.get("color"):
-                    c["color"] = COLORS[i % len(COLORS)]
-                # Ensure mutual connections count
-                if not c.get("mutual"):
-                    c["mutual"] = 5 + (i * 3) % 15
-                # Fix/generate LinkedIn search URL
-                if not c.get("linkedin_search") or "linkedin.com/in/" in c.get("linkedin_search", ""):
-                    c["linkedin_search"] = build_linkedin_search_url(
-                        c.get("name", ""), c.get("role", target_role), company
-                    )
-                # Add email pattern if missing
-                if not c.get("email_pattern"):
-                    name_parts = c.get("name", "John Doe").lower().split()
-                    if len(name_parts) >= 2:
-                        c["email_pattern"] = f"{name_parts[0]}.{name_parts[-1]}@{domain}"
-                    else:
-                        c["email_pattern"] = f"{name_parts[0]}@{domain}"
-            return result
-    except Exception as e:
-        from loguru import logger
-        logger.error(f"Network find_connections failed: {e}")
+SYSTEM_ENRICH = """You are a networking strategist. Given a list of real LinkedIn profiles found via Google search, enrich each with:
+1. Their likely relationship to the target role (hiring_manager / recruiter / team_member / alumnus / influencer)
+2. A specific, personalized LinkedIn outreach message (under 300 chars) that references something real about their background
+3. A clear reason why connecting with them helps the job seeker
 
-    # Fallback — generate generic but realistic connections
+Also suggest 3 additional role TYPES to search for (not fake names — just roles like "Head of HR at {company}", "Ecommerce Category Manager at {company}").
+
+Output JSON:
+{
+  "enriched": [
+    {
+      "id": "conn_001",
+      "name": "<from input>",
+      "role": "<their actual role from snippet>",
+      "company": "<company>",
+      "type": "hiring_manager|recruiter|team_member|alumnus|influencer",
+      "why": "<specific reason this person helps>",
+      "draft": "<personalized message under 300 chars>",
+      "linkedin_url": "<from input — do not change>",
+      "is_real": true
+    }
+  ],
+  "additional_searches": [
+    {"role": "Head of HR", "search_label": "HR / Recruiter"},
+    {"role": "Category Manager", "search_label": "Category Manager"}
+  ],
+  "company_insights": {
+    "culture": "<1 line about company culture>",
+    "hiring_status": "Actively Hiring|Selective Hiring|Unknown",
+    "key_teams": ["team1", "team2"]
+  }
+}"""
+
+
+async def find_connections(company: str, target_role: str, user_profile: dict) -> dict:
     domain = get_company_domain(company)
-    fallback_names = [
-        ("Priya Sharma", "Engineering Manager", "hiring_manager"),
-        ("Arjun Nair", "Senior Technical Recruiter", "recruiter"),
-        ("Kavya Reddy", "Staff Software Engineer", "team_member"),
-        ("Vikram Patel", "Senior Engineer (ex-company)", "alumnus"),
-        ("Ananya Krishnan", "Product Manager", "team_member"),
-        ("Rajan Mehta", "VP Engineering", "hiring_manager"),
-        ("Sneha Iyer", "HR Business Partner", "recruiter"),
-        ("Karthik Subramanian", "Tech Lead", "team_member"),
-        ("Pooja Agarwal", "Director of Engineering", "influencer"),
-        ("Suresh Babu", "Principal Engineer", "team_member"),
+
+    # Step 1: Find REAL people via Google LinkedIn search
+    real_profiles = await google_search_linkedin_profiles(target_role, company)
+    logger.info(f"Google found {len(real_profiles)} real LinkedIn profiles for {target_role} at {company}")
+
+    # Also get real emails from Hunter.io if key available
+    hunter_emails = await find_company_emails_hunter(domain)
+    email_map = {f"{e['first']} {e['last']}".strip().lower(): e["email"] for e in hunter_emails if e.get("email")}
+
+    # Step 2: If we found real profiles, enrich them with Claude
+    if real_profiles:
+        enrich_content = (
+            f"Company: {company}\n"
+            f"Target Role: {target_role}\n"
+            f"User Profile: {json.dumps(user_profile) if user_profile else 'job seeker'}\n\n"
+            f"Real LinkedIn profiles found via Google search:\n"
+            f"{json.dumps(real_profiles, indent=2)}\n\n"
+            f"Enrich these REAL people with connection type, outreach messages, and reasons. "
+            f"Also suggest 2-3 additional role types to search for at {company}."
+        )
+        try:
+            raw = await complete_claude_json(SYSTEM_ENRICH, [{"role": "user", "content": enrich_content}], max_tokens=4096)
+            enriched_data = json.loads(raw)
+            enriched = enriched_data.get("enriched", [])
+            additional = enriched_data.get("additional_searches", [])
+            company_insights = enriched_data.get("company_insights", {})
+
+            connections = []
+            for i, person in enumerate(enriched):
+                name = person.get("name", "")
+                linkedin_url = person.get("linkedin_url", "")
+                # Try to find real email from Hunter
+                real_email = email_map.get(name.lower())
+                email_display = real_email or f"{name.lower().replace(' ', '.').split()[0] if name else 'contact'}@{domain} (likely)"
+
+                connections.append({
+                    "id": f"conn_{i+1:03d}",
+                    "name": name,
+                    "role": person.get("role", target_role),
+                    "company": company,
+                    "avatar": "".join(p[0] for p in name.split()[:2]).upper() if name else "??",
+                    "color": COLORS[i % len(COLORS)],
+                    "type": person.get("type", "team_member"),
+                    "mutual": 0,
+                    "why": person.get("why", ""),
+                    "draft": person.get("draft", ""),
+                    "linkedin_url": linkedin_url,
+                    "linkedin_search": linkedin_url or build_linkedin_search_url(name, person.get("role", target_role), company),
+                    "email_pattern": real_email or email_display,
+                    "email_verified": bool(real_email),
+                    "is_real": True,
+                })
+
+            # Add search suggestion cards for additional roles
+            for i, sr in enumerate(additional[:3]):
+                role_label = sr.get("role", "")
+                connections.append({
+                    "id": f"search_{i+1:03d}",
+                    "name": f"Find: {sr.get('search_label', role_label)}",
+                    "role": role_label,
+                    "company": company,
+                    "avatar": "🔍",
+                    "color": "#64748b",
+                    "type": "search_suggestion",
+                    "mutual": 0,
+                    "why": f"Search for real {role_label} professionals at {company} on LinkedIn",
+                    "draft": "",
+                    "linkedin_search": build_linkedin_search_url("", role_label, company),
+                    "email_pattern": "",
+                    "is_real": False,
+                    "is_search_card": True,
+                })
+
+            return {
+                "connections": connections,
+                "company_insights": {
+                    "culture": company_insights.get("culture", f"Professional environment at {company}"),
+                    "hiring_status": company_insights.get("hiring_status", "Actively Hiring"),
+                    "growth_stage": "Enterprise",
+                    "key_teams": company_insights.get("key_teams", []),
+                },
+                "networking_action_plan": [
+                    f"1. Connect with real people found above — these are verified LinkedIn profiles",
+                    f"2. Personalize the AI-drafted message before sending",
+                    f"3. Mention a specific detail from their profile or company news",
+                    f"4. Follow up once after 1 week if no response",
+                ],
+                "real_profiles_found": len(enriched),
+            }
+        except Exception as e:
+            logger.error(f"Enrich step failed: {e}")
+
+    # Step 3: Fallback — return search-suggestion cards (no fake names)
+    role_types = [
+        (f"Head of {target_role}", "Senior Leader"),
+        (f"Recruiter {company}", "Talent Acquisition"),
+        (f"{target_role} Manager", "Hiring Manager"),
+        (f"HR Business Partner {company}", "HR Contact"),
+        (f"Director {target_role} {company}", "Director"),
     ]
     connections = []
-    for i, (name, role, conn_type) in enumerate(fallback_names):
-        parts = name.lower().split()
+    for i, (search_role, label) in enumerate(role_types):
         connections.append({
-            "id": f"conn_{i+1:03d}",
-            "name": name,
-            "role": role,
+            "id": f"search_{i+1:03d}",
+            "name": f"Search: {label}",
+            "role": search_role,
             "company": company,
-            "avatar": "".join(p[0] for p in name.split()[:2]).upper(),
+            "avatar": "🔍",
             "color": COLORS[i % len(COLORS)],
-            "type": conn_type,
-            "mutual": 5 + i * 2,
-            "why": f"{name} is a {role} at {company} who can provide valuable insights into the team and hiring process.",
-            "draft": f"Hi {name.split()[0]}! I'm exploring {target_role} roles at {company} and your profile stood out. Would love to connect and learn from your experience!",
-            "linkedin_search": build_linkedin_search_url(name, role, company),
-            "email_pattern": f"{parts[0]}.{parts[-1]}@{domain}",
+            "type": "search_suggestion",
+            "mutual": 0,
+            "why": f"Search LinkedIn for real {label} professionals at {company}",
+            "draft": "",
+            "linkedin_search": build_linkedin_search_url("", search_role, company),
+            "email_pattern": f"<firstname>.<lastname>@{domain}",
+            "is_real": False,
+            "is_search_card": True,
         })
     return {
         "connections": connections,
         "company_insights": {
-            "culture": f"Strong engineering culture at {company} with focus on innovation and impact",
-            "hiring_status": "Actively Hiring",
+            "culture": f"Professional environment at {company}",
+            "hiring_status": "Unknown",
             "growth_stage": "Enterprise",
-            "key_teams": ["Engineering", "Product", "Platform"],
+            "key_teams": [],
         },
         "networking_action_plan": [
-            f"1. Connect with the hiring manager at {company} first — direct path to interviews",
-            "2. Reach out to the recruiter with your tailored resume and target role",
-            "3. Get an insider perspective from team members before your interview",
-            "4. Ask alumni for referrals — 3x higher callback rate than cold applications",
+            f"1. Click 'Find on LinkedIn' to search for real people at {company}",
+            "2. Connect with whoever you find in these roles",
+            "3. Personalize your outreach with something specific from their profile",
         ],
+        "real_profiles_found": 0,
     }
 
 
