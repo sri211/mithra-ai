@@ -1,0 +1,89 @@
+from sqlalchemy import Column, String, Integer, Float, DateTime, Text, ForeignKey, JSON, Enum as SAEnum
+from sqlalchemy.orm import relationship
+from datetime import datetime, timezone
+import enum
+from db.database import Base
+
+
+class PlanEnum(str, enum.Enum):
+    free = "free"
+    pro = "pro"
+    elite = "elite"
+
+
+class User(Base):
+    __tablename__ = "users"
+
+    id = Column(String, primary_key=True)
+    email = Column(String, unique=True, nullable=False, index=True)
+    name = Column(String, nullable=False)
+    hashed_password = Column(String, nullable=True)
+    google_id = Column(String, nullable=True, unique=True, index=True)
+    linkedin_id = Column(String, nullable=True)
+    plan = Column(SAEnum(PlanEnum), default=PlanEnum.free, nullable=False)
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+    updated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
+
+    saved_resumes = relationship("SavedResume", back_populates="user", cascade="all, delete-orphan")
+    saved_jobs = relationship("SavedJob", back_populates="user", cascade="all, delete-orphan")
+    adapted_resumes = relationship("AdaptedResume", back_populates="user", cascade="all, delete-orphan")
+    job_searches = relationship("JobSearch", back_populates="user", cascade="all, delete-orphan")
+
+
+class SavedResume(Base):
+    __tablename__ = "saved_resumes"
+
+    id = Column(String, primary_key=True)
+    user_id = Column(String, ForeignKey("users.id"), nullable=False, index=True)
+    name = Column(String, nullable=False)
+    resume_json = Column(JSON, nullable=False)
+    template = Column(String, default="modern")
+    ats_score = Column(Float, default=0.0)
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+
+    user = relationship("User", back_populates="saved_resumes")
+
+
+class SavedJob(Base):
+    __tablename__ = "saved_jobs"
+
+    id = Column(String, primary_key=True)
+    user_id = Column(String, ForeignKey("users.id"), nullable=False, index=True)
+    title = Column(String, nullable=False)
+    company = Column(String, nullable=False)
+    url = Column(String, nullable=True)
+    status = Column(String, default="bookmarked")
+    notes = Column(Text, nullable=True)
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+
+    user = relationship("User", back_populates="saved_jobs")
+
+
+class AdaptedResume(Base):
+    __tablename__ = "adapted_resumes"
+
+    id = Column(String, primary_key=True)
+    user_id = Column(String, ForeignKey("users.id"), nullable=False, index=True)
+    original_resume_id = Column(String, nullable=True)
+    jd_text = Column(Text, nullable=True)
+    company = Column(String, nullable=True)
+    role = Column(String, nullable=True)
+    adapted_json = Column(JSON, nullable=False)
+    ats_before = Column(Float, default=0.0)
+    ats_after = Column(Float, default=0.0)
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+
+    user = relationship("User", back_populates="adapted_resumes")
+
+
+class JobSearch(Base):
+    __tablename__ = "job_searches"
+
+    id = Column(String, primary_key=True)
+    user_id = Column(String, ForeignKey("users.id"), nullable=False, index=True)
+    query = Column(String, nullable=False)
+    location = Column(String, nullable=True)
+    results_json = Column(JSON, nullable=True)
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+
+    user = relationship("User", back_populates="job_searches")
