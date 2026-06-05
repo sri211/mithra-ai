@@ -3,10 +3,8 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
-from passlib.context import CryptContext
+import bcrypt as _bcrypt
 from jose import JWTError, jwt
-
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
 JWT_SECRET = os.getenv("JWT_SECRET", "mithra_ai_jwt_secret_2026_very_long_random_string")
 JWT_ALGORITHM = os.getenv("JWT_ALGORITHM", "HS256")
@@ -15,11 +13,14 @@ REFRESH_TOKEN_EXPIRE_DAYS = 30
 
 
 def hash_password(plain: str) -> str:
-    return pwd_context.hash(plain)
+    return _bcrypt.hashpw(plain.encode("utf-8"), _bcrypt.gensalt()).decode("utf-8")
 
 
 def verify_password(plain: str, hashed: str) -> bool:
-    return pwd_context.verify(plain, hashed)
+    try:
+        return _bcrypt.checkpw(plain.encode("utf-8"), hashed.encode("utf-8"))
+    except Exception:
+        return False
 
 
 def create_jwt(user_id: str, email: str, plan: str) -> str:
