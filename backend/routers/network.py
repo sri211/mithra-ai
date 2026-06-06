@@ -9,6 +9,7 @@ class NetworkRequest(BaseModel):
     company: str
     target_role: str
     user_profile: dict = {}
+    location: str = ""
 
 
 class OutreachRequest(BaseModel):
@@ -19,7 +20,7 @@ class OutreachRequest(BaseModel):
 
 @router.post("/find")
 async def find(req: NetworkRequest):
-    result = await find_connections(req.company, req.target_role, req.user_profile)
+    result = await find_connections(req.company, req.target_role, req.user_profile, req.location)
     return result
 
 

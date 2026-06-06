@@ -212,49 +212,58 @@ def get_company_domain(company: str) -> str:
 COLORS = ["#7c3aed", "#06b6d4", "#10b981", "#f59e0b", "#ec4899", "#6366f1", "#ef4444", "#8b5cf6", "#14b8a6", "#f97316"]
 
 
-SYSTEM_ENRICH = """You are a networking strategist. Given a list of real LinkedIn profiles found via Google search, enrich each with:
-1. Their likely relationship to the target role (hiring_manager / recruiter / team_member / alumnus / influencer)
-2. A specific, personalized LinkedIn outreach message (under 300 chars) that references something real about their background
-3. A clear reason why connecting with them helps the job seeker
+SYSTEM_ENRICH = """You are a precise networking strategist. Given real people found at a company, select and enrich ONLY those relevant to the TARGET ROLE.
 
-Also suggest 3 additional role TYPES to search for (not fake names — just roles like "Head of HR at {company}", "Ecommerce Category Manager at {company}").
+CRITICAL RULES:
+1. TARGET ROLE RELEVANCE — only include people whose position relates to the target role:
+   - "Ecommerce" / "Category Manager" / "Digital" → include: Category Managers, E-commerce heads, Digital/Online team, Supply Chain, Buying, Merchandising. Always include 1-2 recruiters.
+   - "HR" / "Human Resources" / "People" → include: HR BPs, Talent Acquisition, L&D, People Ops, TA Managers. Always include 1 hiring manager.
+   - "Finance" / "Accounts" → include: Finance Managers, CFO, Controllers, FP&A. Include TA.
+   - "Engineering" / "Software" / "Tech" → include: Engineering Managers, Tech Leads, CTOs, Platform heads. Include TA.
+   - EXCLUDE people in completely unrelated departments unless they are a recruiter or senior leader who can refer.
+2. ALWAYS include 1-2 recruiters/HR contacts regardless of target role (they control offers).
+3. If role_snippet is blank, infer from context. Never invent a new name.
+4. Outreach messages must be specific, human, and under 280 chars.
+5. Suggest 2-3 additional LinkedIn search queries to find MORE relevant people for this exact target role.
 
-Output JSON:
+Output ONLY valid JSON:
 {
   "enriched": [
     {
       "id": "conn_001",
-      "name": "<from input>",
-      "role": "<their actual role from snippet>",
+      "name": "<exact name from input>",
+      "role": "<their title from role_snippet or best inference>",
       "company": "<company>",
       "type": "hiring_manager|recruiter|team_member|alumnus|influencer",
-      "why": "<specific reason this person helps>",
-      "draft": "<personalized message under 300 chars>",
+      "why": "<1-2 sentences: specific reason this person helps reach the target role>",
+      "draft": "<personalized LinkedIn message under 280 chars>",
       "linkedin_url": "<from input — do not change>",
-      "is_real": true
+      "is_real": true,
+      "relevance": "high|medium|low"
     }
   ],
   "additional_searches": [
-    {"role": "Head of HR", "search_label": "HR / Recruiter"},
-    {"role": "Category Manager", "search_label": "Category Manager"}
+    {"role": "<role title at company relevant to target>", "search_label": "<short display label>"}
   ],
   "company_insights": {
-    "culture": "<1 line about company culture>",
+    "culture": "<1 concise line about company culture>",
     "hiring_status": "Actively Hiring|Selective Hiring|Unknown",
     "key_teams": ["team1", "team2"]
   }
 }"""
 
 
-async def find_connections(company: str, target_role: str, user_profile: dict) -> dict:
+async def find_connections(company: str, target_role: str, user_profile: dict, location: str = "") -> dict:
     domain = get_company_domain(company)
-    logger.info(f"Network search: company={company}, domain={domain}, role={target_role}")
+    location_str = location.strip() if location else ""
+    logger.info(f"Network search: company={company}, domain={domain}, role={target_role}, location={location_str}")
 
-    # Step 1a: PRIMARY — Hunter.io real people with verified emails
+    # Step 1a: PRIMARY — Hunter.io real people with verified emails (company-wide)
     hunter_people = await find_people_from_hunter(domain)
 
-    # Step 1b: SECONDARY — search for LinkedIn profiles via DuckDuckGo
-    bing_profiles = await search_linkedin_profiles(target_role, company)
+    # Step 1b: SECONDARY — role+location specific LinkedIn profiles via DuckDuckGo
+    search_company = f"{company} {location_str}".strip() if location_str else company
+    bing_profiles = await search_linkedin_profiles(target_role, search_company)
 
     # Merge: prefer Hunter.io people (have real emails), enrich with LinkedIn URLs
     bing_name_map = {p["name"].lower(): p for p in bing_profiles}
@@ -290,14 +299,17 @@ async def find_connections(company: str, target_role: str, user_profile: dict) -
 
     # Step 2: If we found real profiles, enrich them with Claude
     if real_profiles:
+        location_context = f" in {location_str}" if location_str else ""
         enrich_content = (
-            f"Company: {company}\n"
-            f"Target Role: {target_role}\n"
-            f"User Profile: {json.dumps(user_profile) if user_profile else 'job seeker'}\n\n"
-            f"Real people found at {company} (via Hunter.io verified emails + DuckDuckGo LinkedIn search):\n"
+            f"Company: {company}{location_context}\n"
+            f"TARGET ROLE (this is critical — only include people relevant to this): {target_role}\n"
+            f"Location context: {location_str or 'not specified'}\n"
+            f"User Profile: {json.dumps(user_profile) if user_profile else 'job seeker targeting ' + target_role}\n\n"
+            f"People found at {company} (Hunter.io emails + DuckDuckGo LinkedIn):\n"
             f"{json.dumps(real_profiles, indent=2)}\n\n"
-            f"Enrich these REAL people with connection type, outreach messages, and reasons to connect. "
-            f"Also suggest 2-3 additional role types to search for at {company}."
+            f"IMPORTANT: Select and enrich ONLY people whose roles are RELEVANT to '{target_role}'. "
+            f"Recruiters/HR always included. Exclude unrelated departments. "
+            f"Suggest 2-3 LinkedIn searches to find more '{target_role}'-relevant people at {company}."
         )
         try:
             raw = await complete_claude_json(SYSTEM_ENRICH, [{"role": "user", "content": enrich_content}], max_tokens=4096)
