@@ -19,8 +19,8 @@ RAZORPAY_KEY_SECRET = os.getenv("RAZORPAY_KEY_SECRET", "")
 PLANS = {
     "pro": {
         "name": "Pro",
-        "price_inr": 49900,  # paise (₹499)
-        "price_display": "₹499/month",
+        "price_inr": 19800,  # paise (₹198)
+        "price_display": "₹198/month",
         "features": [
             "Unlimited resume adaptations",
             "All templates + PDF export",
@@ -31,8 +31,8 @@ PLANS = {
     },
     "elite": {
         "name": "Elite",
-        "price_inr": 99900,  # paise (₹999)
-        "price_display": "₹999/month",
+        "price_inr": 49800,  # paise (₹498)
+        "price_display": "₹498/month",
         "features": [
             "Everything in Pro",
             "Auto-apply access",
