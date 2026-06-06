@@ -1,13 +1,21 @@
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
 from pydantic import BaseModel
 from typing import Optional
-import json, uuid
+import uuid
 from datetime import datetime
+
+from middleware.auth import get_optional_user
 
 router = APIRouter()
 
-# In-memory store for demo; replace with DB repo in production
-_applications: dict[str, dict] = {}
+# Per-user in-memory store (replace with DB in production)
+_user_applications: dict[str, dict[str, dict]] = {}
+
+
+def get_user_apps(user_id: str) -> dict[str, dict]:
+    if user_id not in _user_applications:
+        _user_applications[user_id] = {}
+    return _user_applications[user_id]
 
 
 class ApplicationCreate(BaseModel):
@@ -33,14 +41,18 @@ KANBAN_STAGES = ["bookmarked", "applied", "screening", "interview", "offer", "re
 
 
 @router.get("/")
-async def list_applications():
-    apps = list(_applications.values())
+async def list_applications(user=Depends(get_optional_user)):
+    user_id = str(user.id) if user else "guest"
+    apps_dict = get_user_apps(user_id)
+    apps = list(apps_dict.values())
     board = {stage: [a for a in apps if a["status"] == stage] for stage in KANBAN_STAGES}
     return {"board": board, "total": len(apps)}
 
 
 @router.post("/")
-async def create_application(req: ApplicationCreate):
+async def create_application(req: ApplicationCreate, user=Depends(get_optional_user)):
+    user_id = str(user.id) if user else "guest"
+    apps_dict = get_user_apps(user_id)
     app_id = str(uuid.uuid4())
     app = {
         "id": app_id,
@@ -48,21 +60,25 @@ async def create_application(req: ApplicationCreate):
         "applied_date": req.applied_date or datetime.utcnow().date().isoformat(),
         **req.model_dump(),
     }
-    _applications[app_id] = app
+    apps_dict[app_id] = app
     return app
 
 
 @router.patch("/{app_id}")
-async def update_application(app_id: str, req: ApplicationUpdate):
-    if app_id not in _applications:
-        from fastapi import HTTPException
+async def update_application(app_id: str, req: ApplicationUpdate, user=Depends(get_optional_user)):
+    from fastapi import HTTPException
+    user_id = str(user.id) if user else "guest"
+    apps_dict = get_user_apps(user_id)
+    if app_id not in apps_dict:
         raise HTTPException(status_code=404, detail="Application not found")
     update = {k: v for k, v in req.model_dump().items() if v is not None}
-    _applications[app_id].update(update)
-    return _applications[app_id]
+    apps_dict[app_id].update(update)
+    return apps_dict[app_id]
 
 
 @router.delete("/{app_id}")
-async def delete_application(app_id: str):
-    _applications.pop(app_id, None)
+async def delete_application(app_id: str, user=Depends(get_optional_user)):
+    user_id = str(user.id) if user else "guest"
+    apps_dict = get_user_apps(user_id)
+    apps_dict.pop(app_id, None)
     return {"deleted": True}
