@@ -10,7 +10,7 @@ load_dotenv()
 
 from routers import chat, resume, jobs, apply, network, interview, tracker
 from routers import auth as auth_router
-from routers import user_data, payments
+from routers import user_data, payments, referral, analytics
 from db.database import init_db
 
 async def ensure_playwright_browsers():
@@ -75,6 +75,8 @@ app.include_router(tracker.router, prefix="/api/tracker", tags=["Tracker"])
 app.include_router(auth_router.router, prefix="/api/auth", tags=["Auth"])
 app.include_router(user_data.router, prefix="/api/user", tags=["User Data"])
 app.include_router(payments.router, prefix="/api/payments", tags=["Payments"])
+app.include_router(referral.router, prefix="/api/referral", tags=["Referral"])
+app.include_router(analytics.router, prefix="/api/analytics", tags=["Analytics"])
 
 @app.get("/api/health")
 async def health():

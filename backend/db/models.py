@@ -21,6 +21,7 @@ class User(Base):
     google_id = Column(String, nullable=True, unique=True, index=True)
     linkedin_id = Column(String, nullable=True)
     plan = Column(SAEnum(PlanEnum), default=PlanEnum.free, nullable=False)
+    referral_code_used = Column(String, nullable=True, index=True)
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
     updated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
 

@@ -3,6 +3,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from agents.resume_builder_agent import build_from_qa, build_from_linkedin, enhance_bullet, stream_build, edit_resume_with_instruction
 from agents.resume_adaptor_agent import adapt_resume, parse_job_description, generate_cover_letter, score_resume_vs_jd
+from agents.resume_scorer_agent import score_resume
 from services.linkedin_scraper import enrich_linkedin_input
 import json
 import io
@@ -10,6 +11,18 @@ import httpx
 from bs4 import BeautifulSoup
 
 router = APIRouter()
+
+
+class ScoreRequest(BaseModel):
+    resume: dict
+    target_role: str = ""
+
+
+@router.post("/score")
+async def score_resume_endpoint(req: ScoreRequest):
+    """Comprehensive resume score — 7 dimensions, 100 points. Free for all users."""
+    result = await score_resume(req.resume, req.target_role)
+    return result
 
 # System prompt for structured extraction
 SYSTEM_EXTRACT = """You are a resume data extraction specialist. Your ONLY job is to read an existing resume document and extract the data into structured JSON.
