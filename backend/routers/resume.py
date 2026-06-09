@@ -76,7 +76,7 @@ class CoverLetterRequest(BaseModel):
     tone: str = "professional"
 
 
-class ScoreRequest(BaseModel):
+class AdaptScoreRequest(BaseModel):
     resume: dict
     jd_text: str
 
@@ -137,8 +137,8 @@ async def cover_letter_route(req: CoverLetterRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.post("/score")
-async def score_route(req: ScoreRequest):
+@router.post("/score-vs-jd")
+async def score_route(req: AdaptScoreRequest):
     try:
         score = await score_resume_vs_jd(req.resume, req.jd_text)
         return score
