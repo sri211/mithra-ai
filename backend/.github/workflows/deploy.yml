@@ -8,15 +8,15 @@ jobs:
   deploy:
     runs-on: ubuntu-latest
     steps:
-      - name: Deploy via SSH
+      - name: Deploy via SSH (password auth)
         uses: appleboy/ssh-action@v1.0.3
         with:
-          host: ${{ secrets.HETZNER_HOST }}
-          username: ${{ secrets.HETZNER_USER }}
-          key: ${{ secrets.HETZNER_SSH_KEY }}
+          host: 49.12.241.17
+          username: root
+          password: ${{ secrets.HETZNER_SSH_PASSWORD }}
           script: |
-            cd ${{ secrets.HETZNER_BACKEND_PATH }}
-            git pull origin master
-            docker-compose down
-            docker-compose up -d --build
+            cd /opt/mithraai && git pull origin master
+            cd /opt/mithraai/backend && docker compose down && docker compose up -d --build
+            sleep 5
+            curl -s http://localhost:8001/api/health
             echo "✅ Deployed at $(date)"
