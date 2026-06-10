@@ -1,0 +1,22 @@
+name: Deploy Backend to Hetzner
+
+on:
+  push:
+    branches: [master]
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Deploy via SSH
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.HETZNER_HOST }}
+          username: ${{ secrets.HETZNER_USER }}
+          key: ${{ secrets.HETZNER_SSH_KEY }}
+          script: |
+            cd ${{ secrets.HETZNER_BACKEND_PATH }}
+            git pull origin master
+            docker-compose down
+            docker-compose up -d --build
+            echo "✅ Deployed at $(date)"
