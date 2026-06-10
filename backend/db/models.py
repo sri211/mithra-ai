@@ -88,3 +88,15 @@ class JobSearch(Base):
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
 
     user = relationship("User", back_populates="job_searches")
+
+
+class AnalyticsEvent(Base):
+    __tablename__ = "analytics_events"
+
+    id = Column(String, primary_key=True)
+    event = Column(String, nullable=False, index=True)   # page_view | feature_use | auth_event | upgrade_click
+    user_id = Column(String, nullable=True, index=True)  # null = anonymous
+    page = Column(String, nullable=True, index=True)     # /resume-builder, etc.
+    feature = Column(String, nullable=True, index=True)  # resume_builder, job_finder, etc.
+    metadata_json = Column(JSON, nullable=True)
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), index=True)
