@@ -372,3 +372,300 @@ async def get_user_journey(
             "features_used":      len(feature_usage),
         },
     }
+
+
+# ── Engagement deep-dive ───────────────────────────────────────────────────────
+
+@router.get("/engagement")
+async def analytics_engagement(
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Activation rates, retention buckets, power users, at-risk, activity feed."""
+    require_admin(current_user)
+
+    now = datetime.now(timezone.utc)
+
+    total_users = (await db.execute(select(func.count()).select_from(User))).scalar() or 0
+
+    # ── Unique user sets per feature (for adoption rates) ────────────────────
+    def ids(rows):
+        return set(r[0] for r in rows if r[0])
+
+    resume_uids = ids((await db.execute(select(SavedResume.user_id.distinct()))).fetchall())
+    adapt_uids  = ids((await db.execute(select(AdaptedResume.user_id.distinct()))).fetchall())
+    search_uids = ids((await db.execute(select(JobSearch.user_id.distinct()))).fetchall())
+    job_uids    = ids((await db.execute(select(SavedJob.user_id.distinct()))).fetchall())
+
+    upgrade_uids = ids((await db.execute(
+        select(AnalyticsEvent.user_id.distinct())
+        .where(AnalyticsEvent.event == "upgrade_click", AnalyticsEvent.user_id.isnot(None))
+    )).fetchall())
+
+    paid_uids = ids((await db.execute(
+        select(User.id).where(User.plan.in_(["pro", "elite"]))
+    )).fetchall())
+
+    all_activated = resume_uids | adapt_uids | search_uids | job_uids
+    activated_count = len(all_activated)
+
+    def rate(n):
+        return round(n / total_users * 100, 1) if total_users > 0 else 0.0
+
+    feature_adoption = {
+        "Built a Resume":   {"count": len(resume_uids),   "rate": rate(len(resume_uids))},
+        "Adapted a Resume": {"count": len(adapt_uids),    "rate": rate(len(adapt_uids))},
+        "Searched Jobs":    {"count": len(search_uids),   "rate": rate(len(search_uids))},
+        "Saved a Job":      {"count": len(job_uids),      "rate": rate(len(job_uids))},
+        "Clicked Upgrade":  {"count": len(upgrade_uids),  "rate": rate(len(upgrade_uids))},
+        "Paid for a Plan":  {"count": len(paid_uids),     "rate": rate(len(paid_uids))},
+    }
+
+    # ── Retention buckets ────────────────────────────────────────────────────
+    retention = {}
+    for days in [7, 14, 30, 60, 90]:
+        cutoff = now - timedelta(days=days)
+        ev_uids = ids((await db.execute(
+            select(AnalyticsEvent.user_id.distinct())
+            .where(AnalyticsEvent.created_at >= cutoff, AnalyticsEvent.user_id.isnot(None))
+        )).fetchall())
+        r_uids = ids((await db.execute(select(SavedResume.user_id.distinct()).where(SavedResume.created_at >= cutoff))).fetchall())
+        a_uids = ids((await db.execute(select(AdaptedResume.user_id.distinct()).where(AdaptedResume.created_at >= cutoff))).fetchall())
+        s_uids = ids((await db.execute(select(JobSearch.user_id.distinct()).where(JobSearch.created_at >= cutoff))).fetchall())
+        active_n = len(ev_uids | r_uids | a_uids | s_uids)
+        retention[f"{days}d"] = {"count": active_n, "rate": rate(active_n)}
+
+    # ── At-risk users (signed up >7d, never activated) ───────────────────────
+    week_ago = now - timedelta(days=7)
+    old_uids = ids((await db.execute(select(User.id).where(User.created_at < week_ago))).fetchall())
+    at_risk_ids = old_uids - all_activated
+    at_risk_examples = []
+    if at_risk_ids:
+        rows = (await db.execute(
+            select(User.id, User.name, User.email, User.created_at, User.plan)
+            .where(User.id.in_(list(at_risk_ids)[:30]))
+            .order_by(User.created_at.desc())
+            .limit(10)
+        )).fetchall()
+        for r in rows:
+            days_since = (now - r[3].replace(tzinfo=timezone.utc)).days if r[3] else 0
+            at_risk_examples.append({"id": r[0], "name": r[1] or "", "email": r[2], "days_since_signup": days_since, "plan": r[4].value})
+
+    # ── Power users (top 10 by events) ───────────────────────────────────────
+    top_ev_map = {r[0]: r[1] for r in (await db.execute(
+        select(AnalyticsEvent.user_id, func.count().label("cnt"))
+        .where(AnalyticsEvent.user_id.isnot(None))
+        .group_by(AnalyticsEvent.user_id)
+        .order_by(func.count().desc())
+        .limit(10)
+    )).fetchall()}
+
+    power_users = []
+    if top_ev_map:
+        urows = (await db.execute(
+            select(User.id, User.name, User.email, User.plan).where(User.id.in_(list(top_ev_map.keys())))
+        )).fetchall()
+        umap = {r[0]: r for r in urows}
+        for uid, ev_cnt in sorted(top_ev_map.items(), key=lambda x: -x[1]):
+            u = umap.get(uid)
+            if not u: continue
+            r_cnt = (await db.execute(select(func.count()).select_from(SavedResume).where(SavedResume.user_id == uid))).scalar() or 0
+            a_cnt = (await db.execute(select(func.count()).select_from(AdaptedResume).where(AdaptedResume.user_id == uid))).scalar() or 0
+            power_users.append({"id": uid, "name": u[1] or "", "email": u[2], "plan": u[3].value, "total_events": ev_cnt, "resumes": r_cnt, "adaptations": a_cnt})
+
+    # ── Usage depth ───────────────────────────────────────────────────────────
+    total_resumes     = (await db.execute(select(func.count()).select_from(SavedResume))).scalar() or 0
+    total_adaptations = (await db.execute(select(func.count()).select_from(AdaptedResume))).scalar() or 0
+    total_searches    = (await db.execute(select(func.count()).select_from(JobSearch))).scalar() or 0
+    total_saved_jobs  = (await db.execute(select(func.count()).select_from(SavedJob))).scalar() or 0
+
+    # ── Template popularity ───────────────────────────────────────────────────
+    templates = {r[0]: r[1] for r in (await db.execute(
+        select(SavedResume.template, func.count().label("cnt"))
+        .where(SavedResume.template.isnot(None))
+        .group_by(SavedResume.template)
+        .order_by(func.count().desc())
+    )).fetchall()}
+
+    # ── Job status pipeline ───────────────────────────────────────────────────
+    job_statuses = {(r[0] or "bookmarked"): r[1] for r in (await db.execute(
+        select(SavedJob.status, func.count().label("cnt"))
+        .group_by(SavedJob.status)
+        .order_by(func.count().desc())
+    )).fetchall()}
+
+    # ── Top search queries ────────────────────────────────────────────────────
+    top_searches = [{"query": r[0], "count": r[1]} for r in (await db.execute(
+        select(JobSearch.query, func.count().label("cnt"))
+        .group_by(JobSearch.query)
+        .order_by(func.count().desc())
+        .limit(10)
+    )).fetchall()]
+
+    # ── Recent activity feed (with user names) ────────────────────────────────
+    ev_rows = (await db.execute(
+        select(AnalyticsEvent.user_id, AnalyticsEvent.event, AnalyticsEvent.page, AnalyticsEvent.feature, AnalyticsEvent.created_at)
+        .where(AnalyticsEvent.user_id.isnot(None))
+        .order_by(AnalyticsEvent.created_at.desc())
+        .limit(25)
+    )).fetchall()
+
+    recent_activity = []
+    if ev_rows:
+        ev_uid_list = list({r[0] for r in ev_rows})
+        umap2 = {r[0]: r for r in (await db.execute(
+            select(User.id, User.name, User.email).where(User.id.in_(ev_uid_list))
+        )).fetchall()}
+        for r in ev_rows:
+            u = umap2.get(r[0])
+            recent_activity.append({
+                "user_id":    r[0],
+                "user_name":  u[1] if u else "",
+                "user_email": u[2] if u else "",
+                "event":   r[1],
+                "page":    r[2],
+                "feature": r[3],
+                "date":    r[4].strftime("%b %d %H:%M") if r[4] else "",
+            })
+
+    all_user_ids = ids((await db.execute(select(User.id))).fetchall())
+    never_activated_count = max(len(all_user_ids) - activated_count, 0)
+
+    return {
+        "activation": {
+            "total_users":       total_users,
+            "activated_count":   activated_count,
+            "activation_rate":   rate(activated_count),
+            "never_activated":   never_activated_count,
+            "feature_adoption":  feature_adoption,
+        },
+        "retention":   retention,
+        "at_risk": {
+            "count":    len(at_risk_ids),
+            "rate":     rate(len(at_risk_ids)),
+            "examples": at_risk_examples,
+        },
+        "power_users":  power_users,
+        "usage_depth": {
+            "total_resumes":             total_resumes,
+            "total_adaptations":         total_adaptations,
+            "total_searches":            total_searches,
+            "total_saved_jobs":          total_saved_jobs,
+            "avg_resumes_per_user":      round(total_resumes / total_users, 2) if total_users else 0,
+            "avg_adaptations_per_user":  round(total_adaptations / total_users, 2) if total_users else 0,
+            "avg_searches_per_user":     round(total_searches / total_users, 2) if total_users else 0,
+        },
+        "templates":       templates,
+        "job_statuses":    job_statuses,
+        "top_searches":    top_searches,
+        "recent_activity": recent_activity,
+    }
+
+
+# ── Revenue & cost analysis ────────────────────────────────────────────────────
+
+@router.get("/revenue")
+async def analytics_revenue(
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """MRR/ARR snapshot, cost estimates, monthly trend, cohort new revenue."""
+    require_admin(current_user)
+    from calendar import monthrange
+
+    now = datetime.now(timezone.utc)
+
+    plan_res = await db.execute(select(User.plan, func.count()).group_by(User.plan))
+    plan_counts = {r[0].value: r[1] for r in plan_res.fetchall()}
+
+    pro_n   = plan_counts.get("pro", 0)
+    elite_n = plan_counts.get("elite", 0)
+    paid_n  = pro_n + elite_n
+    total_n = sum(plan_counts.values())
+
+    mrr = (pro_n * 198) + (elite_n * 498)
+    arr = mrr * 12
+
+    # Feature usage for cost estimation (all-time)
+    total_resumes     = (await db.execute(select(func.count()).select_from(SavedResume))).scalar() or 0
+    total_adaptations = (await db.execute(select(func.count()).select_from(AdaptedResume))).scalar() or 0
+    total_searches    = (await db.execute(select(func.count()).select_from(JobSearch))).scalar() or 0
+
+    # ₹ cost estimates per operation (Claude API + infra estimate)
+    COST_RESUME  = 2.5   # ₹ per resume build
+    COST_ADAPT   = 8.0   # ₹ per adaptation (longer LLM context)
+    COST_SEARCH  = 0.5   # ₹ per job search (API + compute)
+
+    resume_cost = total_resumes * COST_RESUME
+    adapt_cost  = total_adaptations * COST_ADAPT
+    search_cost = total_searches * COST_SEARCH
+    total_cost  = resume_cost + adapt_cost + search_cost
+    net_margin  = mrr - total_cost
+    margin_rate = round(net_margin / mrr * 100, 1) if mrr > 0 else 0.0
+
+    # ── Cohort windows: new paid users in period ──────────────────────────────
+    cohorts = {}
+    for days in [7, 30, 60, 90]:
+        cutoff = now - timedelta(days=days)
+        new_pro = (await db.execute(
+            select(func.count()).select_from(User).where(User.plan == "pro", User.created_at >= cutoff)
+        )).scalar() or 0
+        new_elite = (await db.execute(
+            select(func.count()).select_from(User).where(User.plan == "elite", User.created_at >= cutoff)
+        )).scalar() or 0
+        cohorts[f"{days}d"] = {
+            "new_pro": new_pro, "new_elite": new_elite,
+            "new_paid": new_pro + new_elite,
+            "new_revenue": (new_pro * 198) + (new_elite * 498),
+        }
+
+    # ── Monthly signup revenue trend (last 6 months) ──────────────────────────
+    monthly_trend = []
+    for i in range(5, -1, -1):
+        raw_month = now.month - i
+        if raw_month <= 0:
+            month_num = raw_month + 12
+            year = now.year - 1
+        else:
+            month_num = raw_month
+            year = now.year
+        _, last_day = monthrange(year, month_num)
+        m_start = datetime(year, month_num, 1, tzinfo=timezone.utc)
+        m_end   = datetime(year, month_num, last_day, 23, 59, 59, tzinfo=timezone.utc)
+        pr = (await db.execute(
+            select(User.plan, func.count()).select_from(User)
+            .where(User.created_at >= m_start, User.created_at <= m_end, User.plan != "free")
+            .group_by(User.plan)
+        )).fetchall()
+        mp = {r[0].value: r[1] for r in pr}
+        monthly_trend.append({
+            "month":   m_start.strftime("%b %Y"),
+            "revenue": (mp.get("pro", 0) * 198) + (mp.get("elite", 0) * 498),
+            "new_pro":   mp.get("pro", 0),
+            "new_elite": mp.get("elite", 0),
+        })
+
+    return {
+        "snapshot": {
+            "mrr":        mrr,
+            "arr":        arr,
+            "paid_users": paid_n,
+            "total_users": total_n,
+            "arpu_paid":  round(mrr / paid_n, 2) if paid_n else 0,
+            "plan_breakdown": {
+                "pro":   {"users": pro_n,   "monthly": pro_n * 198,   "share_pct": round(pro_n * 198 / mrr * 100, 1) if mrr else 0},
+                "elite": {"users": elite_n, "monthly": elite_n * 498, "share_pct": round(elite_n * 498 / mrr * 100, 1) if mrr else 0},
+            },
+        },
+        "cost_estimates": {
+            "note": "Estimated LLM/API costs per operation (all-time cumulative)",
+            "resume_builds": {"count": total_resumes,     "unit_cost_inr": COST_RESUME, "total": round(resume_cost)},
+            "adaptations":   {"count": total_adaptations, "unit_cost_inr": COST_ADAPT,  "total": round(adapt_cost)},
+            "job_searches":  {"count": total_searches,    "unit_cost_inr": COST_SEARCH, "total": round(search_cost)},
+            "total_estimated": round(total_cost),
+            "net_margin":      round(net_margin),
+            "margin_rate":     margin_rate,
+        },
+        "cohorts":       cohorts,
+        "monthly_trend": monthly_trend,
+    }
