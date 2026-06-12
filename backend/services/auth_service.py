@@ -69,3 +69,25 @@ def verify_refresh_token(token: str) -> Optional[str]:
 
 def generate_user_id() -> str:
     return str(uuid.uuid4())
+
+
+def create_password_reset_token(user_id: str, email: str) -> str:
+    expire = datetime.now(timezone.utc) + timedelta(hours=1)
+    payload = {
+        "sub": user_id,
+        "email": email,
+        "exp": expire,
+        "iat": datetime.now(timezone.utc),
+        "type": "password_reset",
+    }
+    return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
+
+
+def verify_password_reset_token(token: str) -> Optional[dict]:
+    try:
+        payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+        if payload.get("type") != "password_reset":
+            return None
+        return payload
+    except JWTError:
+        return None

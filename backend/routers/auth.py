@@ -12,7 +12,9 @@ from db.models import User, PlanEnum
 from services.auth_service import (
     hash_password, verify_password,
     create_jwt, create_refresh_token, verify_refresh_token, generate_user_id,
+    create_password_reset_token, verify_password_reset_token,
 )
+from services.email_service import send_password_reset_email
 from middleware.auth import get_current_user
 
 router = APIRouter()
@@ -39,6 +41,15 @@ class GoogleAuthRequest(BaseModel):
 
 class GoogleAccessTokenRequest(BaseModel):
     access_token: str
+
+
+class ForgotPasswordRequest(BaseModel):
+    email: EmailStr
+
+
+class ResetPasswordRequest(BaseModel):
+    token: str
+    new_password: str
 
 
 class RefreshRequest(BaseModel):
@@ -222,6 +233,38 @@ async def google_access_token_auth(req: GoogleAccessTokenRequest, db: AsyncSessi
     access = create_jwt(user.id, user.email, user.plan.value)
     refresh = create_refresh_token(user.id)
     return AuthResponse(access_token=access, refresh_token=refresh, user=_user_dict(user))
+
+
+@router.post("/forgot-password")
+async def forgot_password(req: ForgotPasswordRequest, db: AsyncSession = Depends(get_db)):
+    result = await db.execute(select(User).where(User.email == req.email))
+    user = result.scalar_one_or_none()
+    # Always return 200 — never reveal whether an email is registered
+    if not user or not user.hashed_password:
+        return {"message": "If that email is registered, a reset link has been sent."}
+    token = create_password_reset_token(user.id, user.email)
+    try:
+        await send_password_reset_email(user.email, token)
+    except Exception:
+        raise HTTPException(status_code=503, detail="Could not send email. Please try again later.")
+    return {"message": "If that email is registered, a reset link has been sent."}
+
+
+@router.post("/reset-password")
+async def reset_password(req: ResetPasswordRequest, db: AsyncSession = Depends(get_db)):
+    payload = verify_password_reset_token(req.token)
+    if not payload:
+        raise HTTPException(status_code=400, detail="Reset link is invalid or has expired. Please request a new one.")
+    if len(req.new_password) < 8:
+        raise HTTPException(status_code=400, detail="Password must be at least 8 characters.")
+    result = await db.execute(select(User).where(User.id == payload["sub"]))
+    user = result.scalar_one_or_none()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found.")
+    user.hashed_password = hash_password(req.new_password)
+    await db.commit()
+    logger.info(f"Password reset for {user.email}")
+    return {"message": "Password updated. You can now sign in."}
 
 
 @router.get("/me")
