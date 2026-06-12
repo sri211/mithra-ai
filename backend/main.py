@@ -13,27 +13,10 @@ from routers import auth as auth_router
 from routers import user_data, payments, referral, analytics
 from db.database import init_db
 
-async def ensure_playwright_browsers():
-    """Install Playwright Chromium browser if not already installed."""
-    try:
-        import subprocess, sys
-        result = subprocess.run(
-            [sys.executable, "-m", "playwright", "install", "chromium", "--with-deps"],
-            capture_output=True, text=True, timeout=120
-        )
-        if result.returncode == 0:
-            logger.info("Playwright Chromium ready")
-        else:
-            logger.warning(f"Playwright install: {result.stderr[:200]}")
-    except Exception as e:
-        logger.warning(f"Could not install Playwright browsers: {e}")
-
-
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     logger.info("Starting Mithra AI Backend...")
     await init_db()
-    asyncio.create_task(ensure_playwright_browsers())
     rapidapi_key = os.getenv("RAPIDAPI_KEY", "")
     if rapidapi_key:
         logger.info("JSearch API (RapidAPI) is ENABLED — real job listings active")
