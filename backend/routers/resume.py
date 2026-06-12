@@ -243,16 +243,20 @@ async def upload_resume_file(file: UploadFile = File(...)):
         try:
             from docx import Document as DocxDocument
             doc = DocxDocument(io.BytesIO(content))
+            seen = set()
             paragraphs = []
             for para in doc.paragraphs:
-                if para.text.strip():
-                    paragraphs.append(para.text)
-            # Also extract from tables
+                t = para.text.strip()
+                if t and t not in seen:
+                    seen.add(t)
+                    paragraphs.append(t)
             for table in doc.tables:
                 for row in table.rows:
                     for cell in row.cells:
-                        if cell.text.strip():
-                            paragraphs.append(cell.text)
+                        t = cell.text.strip()
+                        if t and t not in seen:
+                            seen.add(t)
+                            paragraphs.append(t)
             text = "\n".join(paragraphs)
         except Exception as e:
             raise HTTPException(status_code=400, detail=f"Could not read DOCX: {str(e)}")
@@ -261,7 +265,12 @@ async def upload_resume_file(file: UploadFile = File(...)):
         # Plain text
         text = content.decode("utf-8", errors="ignore")
 
-    text = text.strip()
+    # Strip null bytes and other control chars that break Claude's JSON output
+    import re as _re
+    text = _re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]', ' ', text).strip()
+    # Collapse runs of whitespace/blank lines
+    text = _re.sub(r'\n{3,}', '\n\n', text)
+
     if not text or len(text) < 30:
         raise HTTPException(
             status_code=400,
@@ -272,7 +281,7 @@ async def upload_resume_file(file: UploadFile = File(...)):
 File type: {ext.upper()}
 
 Document content:
-{text[:14000]}
+{text[:18000]}
 
 Extract every field exactly as it appears. Do not change job titles, industries, or add information not in the document."""
 
