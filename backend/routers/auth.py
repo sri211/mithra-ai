@@ -37,6 +37,10 @@ class GoogleAuthRequest(BaseModel):
     id_token: str
 
 
+class GoogleAccessTokenRequest(BaseModel):
+    access_token: str
+
+
 class RefreshRequest(BaseModel):
     refresh_token: str
 
@@ -89,7 +93,12 @@ async def register(req: RegisterRequest, db: AsyncSession = Depends(get_db)):
 async def login(req: LoginRequest, db: AsyncSession = Depends(get_db)):
     result = await db.execute(select(User).where(User.email == req.email))
     user = result.scalar_one_or_none()
-    if not user or not user.hashed_password or not verify_password(req.password, user.hashed_password):
+    if not user:
+        raise HTTPException(status_code=401, detail="Invalid email or password")
+    if not user.hashed_password:
+        # Account was created via Google — guide user to the right flow
+        raise HTTPException(status_code=401, detail="This account was created with Google. Please use 'Sign in with Google' instead.")
+    if not verify_password(req.password, user.hashed_password):
         raise HTTPException(status_code=401, detail="Invalid email or password")
 
     access = create_jwt(user.id, user.email, user.plan.value)
@@ -154,6 +163,61 @@ async def google_auth(req: GoogleAuthRequest, db: AsyncSession = Depends(get_db)
             await db.commit()
             await db.refresh(user)
             logger.info(f"New Google user: {email}")
+
+    access = create_jwt(user.id, user.email, user.plan.value)
+    refresh = create_refresh_token(user.id)
+    return AuthResponse(access_token=access, refresh_token=refresh, user=_user_dict(user))
+
+
+@router.post("/google-access-token", response_model=AuthResponse)
+async def google_access_token_auth(req: GoogleAccessTokenRequest, db: AsyncSession = Depends(get_db)):
+    """OAuth2 access_token flow — fallback for browsers that block One Tap (third-party cookies)."""
+    try:
+        async with httpx.AsyncClient() as client:
+            resp = await client.get(
+                "https://www.googleapis.com/oauth2/v3/userinfo",
+                headers={"Authorization": f"Bearer {req.access_token}"},
+                timeout=10,
+            )
+        if resp.status_code != 200:
+            raise HTTPException(status_code=401, detail="Invalid Google access token")
+
+        info = resp.json()
+        google_id = info.get("sub")
+        email = info.get("email")
+        name = info.get("name", email.split("@")[0] if email else "User")
+
+        if not google_id or not email:
+            raise HTTPException(status_code=400, detail="Could not extract user info from Google token")
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Google access token auth error: {e}")
+        raise HTTPException(status_code=500, detail="Google verification failed")
+
+    result = await db.execute(select(User).where(User.google_id == google_id))
+    user = result.scalar_one_or_none()
+
+    if not user:
+        result = await db.execute(select(User).where(User.email == email))
+        user = result.scalar_one_or_none()
+        if user:
+            user.google_id = google_id
+            await db.commit()
+            await db.refresh(user)
+        else:
+            user = User(
+                id=generate_user_id(),
+                email=email,
+                name=name,
+                google_id=google_id,
+                plan=PlanEnum.free,
+            )
+            db.add(user)
+            await db.commit()
+            await db.refresh(user)
+            logger.info(f"New Google user (access token flow): {email}")
 
     access = create_jwt(user.id, user.email, user.plan.value)
     refresh = create_refresh_token(user.id)
