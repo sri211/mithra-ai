@@ -1,5 +1,5 @@
 from fastapi import APIRouter, HTTPException, UploadFile, File
-from fastapi.responses import StreamingResponse
+from fastapi.responses import StreamingResponse, Response as FileResponse
 from pydantic import BaseModel
 from agents.resume_builder_agent import build_from_qa, build_from_linkedin, enhance_bullet, stream_build, edit_resume_with_instruction
 from agents.resume_adaptor_agent import adapt_resume, parse_job_description, generate_cover_letter, score_resume_vs_jd
@@ -543,3 +543,44 @@ async def fetch_jd_route(req: FetchJDRequest):
         raise HTTPException(status_code=422, detail="Could not extract job description from this URL. The page may require login or is heavily JS-rendered. Please paste the job description text manually.")
 
     return {"text": text, "title": title, "used_playwright": used_playwright}
+
+
+class ExportPDFRequest(BaseModel):
+    html: str
+    name: str = "resume"
+
+
+@router.post("/export-pdf")
+async def export_pdf_endpoint(req: ExportPDFRequest):
+    """Render resume HTML to PDF using Playwright headless Chromium."""
+    try:
+        from playwright.async_api import async_playwright
+        async with async_playwright() as p:
+            browser = await p.chromium.launch(
+                headless=True,
+                args=[
+                    "--no-sandbox",
+                    "--disable-setuid-sandbox",
+                    "--disable-dev-shm-usage",
+                    "--disable-accelerated-2d-canvas",
+                    "--disable-gpu",
+                ],
+            )
+            page = await browser.new_page()
+            await page.set_content(req.html, wait_until="networkidle")
+            await page.wait_for_timeout(800)
+            pdf_bytes = await page.pdf(
+                format="A4",
+                print_background=True,
+                margin={"top": "0mm", "right": "0mm", "bottom": "0mm", "left": "0mm"},
+            )
+            await browser.close()
+
+        safe_name = "".join(c for c in req.name if c.isalnum() or c in " _-").strip() or "resume"
+        return FileResponse(
+            content=pdf_bytes,
+            media_type="application/pdf",
+            headers={"Content-Disposition": f'attachment; filename="{safe_name}_resume.pdf"'},
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"PDF generation failed: {str(e)}")
