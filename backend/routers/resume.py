@@ -146,11 +146,56 @@ async def score_route(req: AdaptScoreRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+def _repair_truncated_json(text: str) -> str:
+    """Close any open strings/arrays/objects left by a truncated Claude response."""
+    stack = []
+    in_string = False
+    escape_next = False
+    for ch in text:
+        if escape_next:
+            escape_next = False
+            continue
+        if ch == '\\' and in_string:
+            escape_next = True
+            continue
+        if ch == '"':
+            in_string = not in_string
+            continue
+        if in_string:
+            continue
+        if ch in ('{', '['):
+            stack.append(ch)
+        elif ch == '}' and stack and stack[-1] == '{':
+            stack.pop()
+        elif ch == ']' and stack and stack[-1] == '[':
+            stack.pop()
+    closer = ('"' if in_string else '')
+    for ch in reversed(stack):
+        closer += '}' if ch == '{' else ']'
+    return text + closer
+
+
+def _parse_json_resilient(raw: str, label: str = "") -> dict:
+    """Parse JSON; if truncated, attempt bracket repair before failing."""
+    import json as _json
+    from loguru import logger
+    try:
+        return _json.loads(raw)
+    except _json.JSONDecodeError:
+        try:
+            repaired = _repair_truncated_json(raw)
+            result = _json.loads(repaired)
+            if label:
+                logger.warning(f"Repaired truncated JSON for {label}")
+            return result
+        except Exception:
+            raise
+
+
 @router.post("/parse-file")
 async def parse_file_route(req: ParseFileRequest):
     """Parse resume text — used when text is pre-extracted client-side."""
     from services.claude_service import complete_claude_json
-    import json as _json
 
     prompt = f"""File: {req.file_name}
 
@@ -160,8 +205,8 @@ Document content:
 Extract every field exactly as written. Do not change job titles, industries, or add information."""
 
     try:
-        raw = await complete_claude_json(SYSTEM_EXTRACT, [{"role": "user", "content": prompt}], max_tokens=4096)
-        resume = _json.loads(raw)
+        raw = await complete_claude_json(SYSTEM_EXTRACT, [{"role": "user", "content": prompt}], max_tokens=8192)
+        resume = _parse_json_resilient(raw, req.file_name)
         return {"resume": resume}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -175,7 +220,6 @@ async def upload_resume_file(file: UploadFile = File(...)):
     This is the CORRECT way to handle PDF uploads, not readAsText().
     """
     from services.claude_service import complete_claude_json as ccj
-    import json as _json
 
     filename = file.filename or "resume"
     ext = filename.lower().rsplit(".", 1)[-1]
@@ -233,8 +277,8 @@ Document content:
 Extract every field exactly as it appears. Do not change job titles, industries, or add information not in the document."""
 
     try:
-        raw = await ccj(SYSTEM_EXTRACT, [{"role": "user", "content": prompt}], max_tokens=4096)
-        resume = _json.loads(raw)
+        raw = await ccj(SYSTEM_EXTRACT, [{"role": "user", "content": prompt}], max_tokens=8192)
+        resume = _parse_json_resilient(raw, filename)
         return {"resume": resume, "chars_extracted": len(text), "pages": text.count("\n\n")}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"AI parsing failed: {str(e)}")
