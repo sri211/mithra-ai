@@ -29,6 +29,8 @@ class User(Base):
     saved_jobs = relationship("SavedJob", back_populates="user", cascade="all, delete-orphan")
     adapted_resumes = relationship("AdaptedResume", back_populates="user", cascade="all, delete-orphan")
     job_searches = relationship("JobSearch", back_populates="user", cascade="all, delete-orphan")
+    job_applications = relationship("JobApplication", back_populates="user", cascade="all, delete-orphan")
+    apply_campaigns = relationship("ApplyCampaign", back_populates="user", cascade="all, delete-orphan")
 
 
 class SavedResume(Base):
@@ -88,6 +90,42 @@ class JobSearch(Base):
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
 
     user = relationship("User", back_populates="job_searches")
+
+
+class JobApplication(Base):
+    __tablename__ = "job_applications"
+
+    id = Column(String, primary_key=True)
+    user_id = Column(String, ForeignKey("users.id"), nullable=False, index=True)
+    job_id = Column(String, nullable=False, index=True)
+    company = Column(String, nullable=False)
+    role = Column(String, nullable=False)
+    job_url = Column(String, nullable=True)
+    platform = Column(String, nullable=True)
+    match_score = Column(Integer, default=0)
+    status = Column(String, default="applied")
+    adapted_resume = Column(JSON, nullable=True)
+    cover_letter = Column(Text, nullable=True)
+    jd_snippet = Column(Text, nullable=True)
+    applied_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+    notes = Column(Text, nullable=True)
+
+    user = relationship("User", back_populates="job_applications")
+
+
+class ApplyCampaign(Base):
+    __tablename__ = "apply_campaigns"
+
+    id = Column(String, primary_key=True)
+    user_id = Column(String, ForeignKey("users.id"), nullable=False, index=True)
+    name = Column(String, nullable=False)
+    criteria = Column(JSON, nullable=False)
+    status = Column(String, default="active")
+    jobs_found = Column(Integer, default=0)
+    jobs_applied = Column(Integer, default=0)
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+
+    user = relationship("User", back_populates="apply_campaigns")
 
 
 class AnalyticsEvent(Base):

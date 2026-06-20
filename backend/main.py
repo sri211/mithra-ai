@@ -8,7 +8,7 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-from routers import chat, resume, jobs, apply, network, interview, tracker
+from routers import chat, resume, jobs, apply, network, interview, tracker, auto_apply
 from routers import auth as auth_router
 from routers import user_data, payments, referral, analytics
 from db.database import init_db
@@ -53,6 +53,7 @@ app.include_router(apply.router, prefix="/api/apply", tags=["Apply"])
 app.include_router(network.router, prefix="/api/network", tags=["Network"])
 app.include_router(interview.router, prefix="/api/interview", tags=["Interview"])
 app.include_router(tracker.router, prefix="/api/tracker", tags=["Tracker"])
+app.include_router(auto_apply.router, prefix="/api/auto-apply", tags=["Auto Apply"])
 
 # ── Auth / User / Payments routers ────────────────────────────────────────────
 app.include_router(auth_router.router, prefix="/api/auth", tags=["Auth"])
