@@ -31,6 +31,7 @@ class User(Base):
     job_searches = relationship("JobSearch", back_populates="user", cascade="all, delete-orphan")
     job_applications = relationship("JobApplication", back_populates="user", cascade="all, delete-orphan")
     apply_campaigns = relationship("ApplyCampaign", back_populates="user", cascade="all, delete-orphan")
+    portal_credentials = relationship("PortalCredential", back_populates="user", cascade="all, delete-orphan")
 
 
 class SavedResume(Base):
@@ -126,6 +127,19 @@ class ApplyCampaign(Base):
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
 
     user = relationship("User", back_populates="apply_campaigns")
+
+
+class PortalCredential(Base):
+    __tablename__ = "portal_credentials"
+
+    id = Column(String, primary_key=True)
+    user_id = Column(String, ForeignKey("users.id"), nullable=False, index=True)
+    portal = Column(String, nullable=False)      # linkedin | naukri | instahyre | indeed
+    username = Column(String, nullable=False)    # email or phone
+    password_enc = Column(String, nullable=False)
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+
+    user = relationship("User", back_populates="portal_credentials")
 
 
 class AnalyticsEvent(Base):
