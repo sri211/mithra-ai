@@ -73,6 +73,7 @@ class AdaptedResume(Base):
     company = Column(String, nullable=True)
     role = Column(String, nullable=True)
     adapted_json = Column(JSON, nullable=False)
+    template = Column(String, default="modern")
     ats_before = Column(Float, default=0.0)
     ats_after = Column(Float, default=0.0)
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))

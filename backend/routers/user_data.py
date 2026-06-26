@@ -27,6 +27,7 @@ class SaveAdaptedResumeRequest(BaseModel):
     company: Optional[str] = None
     role: Optional[str] = None
     adapted_json: Any
+    template: str = "modern"
     ats_before: float = 0.0
     ats_after: float = 0.0
 
@@ -125,6 +126,7 @@ async def save_adapted_resume(
         company=req.company,
         role=req.role,
         adapted_json=req.adapted_json,
+        template=req.template,
         ats_before=req.ats_before,
         ats_after=req.ats_after,
     )
@@ -135,6 +137,7 @@ async def save_adapted_resume(
         "id": adapted.id,
         "company": adapted.company,
         "role": adapted.role,
+        "template": adapted.template,
         "ats_before": adapted.ats_before,
         "ats_after": adapted.ats_after,
         "created_at": adapted.created_at.isoformat(),
@@ -157,6 +160,7 @@ async def list_adapted_resumes(
             "id": r.id,
             "company": r.company,
             "role": r.role,
+            "template": r.template or "modern",
             "ats_before": r.ats_before,
             "ats_after": r.ats_after,
             "adapted_json": r.adapted_json,

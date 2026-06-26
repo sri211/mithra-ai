@@ -2,6 +2,7 @@
 Job Finder Agent — fetches real jobs via JSearch API (RapidAPI), falls back to Claude generation.
 """
 import json
+import re
 import uuid
 import os
 import httpx
@@ -70,6 +71,46 @@ For each job, add:
 - apply_priority: "high" | "medium" | "low"
 
 Return the enriched jobs array as JSON."""
+
+SYSTEM_RESUME_JOB_GENERATOR = """You are India's most precise job-matching AI. A candidate's complete resume profile is provided. Generate EXACTLY 8 job listings that this specific candidate would be an excellent match for.
+
+CRITICAL MATCHING RULES:
+1. Read the candidate's skills, job titles, domain, and experience CAREFULLY
+2. Generate jobs that match their EXACT background — never suggest roles outside their domain
+3. Match seniority precisely: junior profiles → entry/mid roles; senior profiles → senior/lead roles
+4. Use the candidate's preferred location (or Bangalore/Hyderabad if unspecified)
+5. Skills in each job listing MUST substantially overlap with the candidate's actual skills
+6. Use companies that ACTIVELY hire for this profile type in India (2026)
+7. Set salary ranges based on the candidate's years of experience
+8. All portal_url fields must be valid real search URLs for the role
+9. posted_date MUST be in 2026
+
+QUALITY BAR: Each job must feel hand-picked. If the candidate is a Python ML Engineer, all 8 jobs should be ML/AI/Data roles at tech companies — never generic software roles.
+
+Output ONLY a valid JSON array with EXACTLY 8 jobs (no other text, no markdown):
+[
+  {
+    "id": "job_<unique_6char>",
+    "title": "specific job title matching candidate profile",
+    "company": "company name",
+    "company_logo": "https://logo.clearbit.com/<domain.com>",
+    "location": "<City>, India",
+    "remote": "Remote|Hybrid|On-site",
+    "salary_min": <integer INR>,
+    "salary_max": <integer INR>,
+    "salary_currency": "INR",
+    "experience_required": "X-Y years",
+    "posted_date": "2026-06-<DD between 01-26>",
+    "description": "2-3 sentence description specifically relevant to this candidate's background",
+    "skills": ["candidate's skill 1", "skill 2", "skill 3", "skill 4", "skill 5"],
+    "portal": "LinkedIn|Naukri|Indeed|Glassdoor|Instahyre",
+    "portal_url": "<real search URL>",
+    "url": "<real search URL for this company+role>",
+    "job_type": "Full-time",
+    "seniority": "Entry|Mid|Senior|Lead|Principal|Director",
+    "match_score": <integer 78-97>
+  }
+]"""
 
 FALLBACK_JOBS = [
     {
@@ -140,8 +181,6 @@ async def generate_jobs_with_claude(
     messages = [{"role": "user", "content": content}]
     try:
         raw = await complete_claude_json(SYSTEM_JOB_GENERATOR, messages, max_tokens=4096)
-        # Extract JSON array robustly
-        import re
         raw = raw.strip()
         for pat in [r"```json\s*([\s\S]*?)\s*```", r"```\s*([\s\S]*?)\s*```"]:
             m = re.search(pat, raw)
@@ -167,6 +206,84 @@ async def generate_jobs_with_claude(
             return jobs
     except Exception as e:
         logger.error(f"Claude job generation failed: {e}")
+    return []
+
+
+async def generate_jobs_with_resume(
+    resume_profile: dict,
+    location: str = "",
+    experience_years: int = 0,
+    remote: str = "",
+    salary_min: int = 0,
+) -> list[dict]:
+    """Generate 8 highly targeted jobs based on the candidate's full resume profile."""
+    personal = resume_profile.get("personal", {})
+    name = personal.get("name", "Candidate")
+    title = personal.get("title", "")
+    resume_loc = location or personal.get("location", "Bangalore")
+
+    skills_raw = resume_profile.get("skills", {})
+    if isinstance(skills_raw, dict):
+        all_skills = (
+            skills_raw.get("technical", [])
+            + skills_raw.get("soft", [])
+            + skills_raw.get("tools", [])
+        )
+    elif isinstance(skills_raw, list):
+        all_skills = skills_raw
+    else:
+        all_skills = []
+
+    experience = resume_profile.get("experience", [])
+    years_exp = experience_years
+    if not years_exp and experience:
+        years_exp = min(len(experience) * 2, 15)
+
+    exp_lines = []
+    for exp in experience[:3]:
+        exp_lines.append(f"  - {exp.get('role', '')} at {exp.get('company', '')} ({exp.get('start', '')}–{'Present' if exp.get('current') else exp.get('end', '')})")
+
+    summary = resume_profile.get("summary", "")
+
+    content_parts = [
+        f"Candidate: {name}",
+        f"Current Title: {title}" if title else "",
+        f"Location: {resume_loc}",
+        f"Years of Experience: {years_exp}" if years_exp else "",
+        f"Skills: {', '.join(all_skills[:15])}" if all_skills else "",
+        "Recent Experience:\n" + "\n".join(exp_lines) if exp_lines else "",
+        f"Summary: {summary[:300]}" if summary else "",
+        f"Work Type Preference: {remote}" if remote else "",
+        f"Minimum Salary: ₹{salary_min // 100000}L per annum" if salary_min else "",
+    ]
+    content = "\n".join([p for p in content_parts if p])
+    content += "\n\nGenerate EXACTLY 8 perfectly matched jobs for this candidate. Every job must align tightly with their specific skills and background."
+
+    messages = [{"role": "user", "content": content}]
+    try:
+        raw = await complete_claude_json(SYSTEM_RESUME_JOB_GENERATOR, messages, max_tokens=4096)
+        raw = raw.strip()
+        for pat in [r"```json\s*([\s\S]*?)\s*```", r"```\s*([\s\S]*?)\s*```"]:
+            m = re.search(pat, raw)
+            if m:
+                raw = m.group(1).strip()
+                break
+        start = raw.find("[")
+        if start != -1:
+            end = raw.rfind("]")
+            if end > start:
+                raw = raw[start : end + 1]
+        jobs = json.loads(raw)
+        if isinstance(jobs, list) and len(jobs) > 0:
+            for job in jobs:
+                if not job.get("id") or job["id"] == "job_<unique_6char>":
+                    job["id"] = f"job_{uuid.uuid4().hex[:6]}"
+                if not job.get("company_logo") and job.get("company"):
+                    domain = job["company"].lower().replace(" ", "").replace(",", "") + ".com"
+                    job["company_logo"] = f"https://logo.clearbit.com/{domain}"
+            return jobs
+    except Exception as e:
+        logger.error(f"Resume-based job generation failed: {e}")
     return []
 
 
