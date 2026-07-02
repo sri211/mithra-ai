@@ -63,24 +63,33 @@ Output ONLY a valid JSON array with EXACTLY 8 jobs (no other text, no markdown):
   }
 ]"""
 
-SYSTEM_JOB_RANKER = """You are a career advisor. Score each job by how well it fits this specific candidate.
+SYSTEM_JOB_RANKER = """You are a career advisor. For each job listing, do TWO things:
+1. Extract structured data from the job description (since many listings lack structured fields)
+2. Score the job against the candidate's profile
 
-For EACH job in the input, return one object:
+For EACH job return one JSON object:
 {
   "id": "<same id from input>",
-  "match_score": <integer 40-95 — use the FULL range, differentiate clearly>,
-  "why_match": "One sentence explaining the fit",
+  "match_score": <integer 40-95>,
+  "skills_extracted": ["skill1", "skill2", ...],
+  "experience_required": "X-Y years",
+  "seniority_detected": "Entry|Mid|Senior|Lead|Director",
+  "why_match": "One sentence explaining the fit or mismatch",
   "apply_priority": "high|medium|low"
 }
 
-Scoring rules:
-- 85-95: Near-perfect skills + seniority + domain match
-- 70-84: Good match, minor gaps
-- 55-69: Partial match, notable skill gaps
-- 40-54: Weak match, different domain or level
+Extraction rules:
+- skills_extracted: Pull ALL skills, tools, technologies, qualifications from the description text
+- experience_required: Extract exact experience requirement (e.g., "3-5 years") from description text
+- seniority_detected: Infer from title + requirements (entry=0-2yr, mid=2-5yr, senior=5-8yr, lead=8yr+)
 
-IMPORTANT: Do NOT cluster all scores in a narrow range. Differentiate based on real fit.
-Return ONLY a JSON array, no other text."""
+Scoring rules (use the FULL 40-95 range, differentiate clearly):
+- 85-95: Skills, domain, seniority all match candidate profile
+- 70-84: Good domain match, minor skill gaps
+- 55-69: Partial match, notable gaps in domain or level
+- 40-54: Different domain or significantly over/under qualified
+
+Return ONLY a valid JSON array, no other text."""
 
 SYSTEM_RESUME_JOB_GENERATOR = """You are India's most precise job-matching AI. A candidate's complete resume profile is provided. Generate EXACTLY 8 job listings that this specific candidate would be an excellent match for.
 
@@ -324,12 +333,12 @@ async def fetch_jobs_from_jsearch(
             return []
 
         jobs: list[dict] = []
-        for rj in raw_jobs[:8]:
+        for rj in raw_jobs[:10]:  # Take up to 10 so we have headroom after dedup
             job_title = rj.get("job_title", "")
             employer = rj.get("employer_name", "")
             city = rj.get("job_city") or rj.get("job_country") or "India"
             apply_link = rj.get("job_apply_link", "")
-            description = rj.get("job_description", "")[:400]
+            description = rj.get("job_description", "")[:1500]
             posted_dt = rj.get("job_posted_at_datetime_utc", "")
             emp_type = rj.get("job_employment_type") or "Full-time"
             required_skills = rj.get("job_required_skills") or []
@@ -418,13 +427,25 @@ async def search_jobs(
     if RAPIDAPI_KEY:
         real_jobs = await fetch_jobs_from_jsearch(query, location)
         if real_jobs:
+            if len(real_jobs) >= 8:
+                return real_jobs[:8]
+            # JSearch returned fewer than 8 — supplement with Claude to always show 8
+            logger.info(f"JSearch returned {len(real_jobs)} jobs, supplementing with Claude")
+            needed = 8 - len(real_jobs)
+            extra = await generate_jobs_with_claude(query, location, experience_years, remote, salary_min)
+            for job in extra[:needed]:
+                job["is_real_listing"] = False
+                if not job.get("url") or job["url"] in ("#", ""):
+                    title_enc = job.get("title", query).replace(" ", "+")
+                    company_enc = job.get("company", "").replace(" ", "+")
+                    job["url"] = f"https://www.google.com/search?q={title_enc}+{company_enc}+jobs"
+                real_jobs.append(job)
             return real_jobs
         logger.warning("JSearch returned no results, falling back to Claude generation")
 
-    # Fall back to Claude generation
+    # Full Claude generation fallback
     jobs = await generate_jobs_with_claude(query, location, experience_years, remote, salary_min)
     if jobs:
-        # Mark as Claude-generated (not real listings) and set Google Jobs fallback URLs
         for job in jobs:
             job["is_real_listing"] = False
             if not job.get("url") or job["url"] in ("#", ""):
@@ -434,7 +455,6 @@ async def search_jobs(
         return jobs
 
     logger.warning(f"Claude generation failed for query: {query}, using fallback")
-    # Fallback jobs also get Google search URLs
     for job in FALLBACK_JOBS:
         job["is_real_listing"] = False
         title_enc = job.get("title", "").replace(" ", "+")
@@ -447,7 +467,7 @@ async def rank_jobs_for_profile(jobs: list[dict], user_profile: dict) -> list[di
     if not jobs:
         return jobs
 
-    # Send only essential fields to keep token count low
+    # Include full description (up to 800 chars) so Claude can extract skills/experience from it
     slim_jobs = [
         {
             "id": j.get("id"),
@@ -456,7 +476,7 @@ async def rank_jobs_for_profile(jobs: list[dict], user_profile: dict) -> list[di
             "skills": j.get("skills", []),
             "experience_required": j.get("experience_required", ""),
             "seniority": j.get("seniority", ""),
-            "description": (j.get("description") or "")[:150],
+            "description": (j.get("description") or "")[:800],
         }
         for j in jobs
     ]
@@ -464,7 +484,7 @@ async def rank_jobs_for_profile(jobs: list[dict], user_profile: dict) -> list[di
     content = f"Candidate profile:\n{json.dumps(user_profile)}\n\nJob listings:\n{json.dumps(slim_jobs)}"
     messages = [{"role": "user", "content": content}]
     try:
-        raw = await complete_claude_json(SYSTEM_JOB_RANKER, messages, max_tokens=1500)
+        raw = await complete_claude_json(SYSTEM_JOB_RANKER, messages, max_tokens=2500)
         raw = raw.strip()
         start = raw.find("[")
         end = raw.rfind("]")
@@ -472,22 +492,31 @@ async def rank_jobs_for_profile(jobs: list[dict], user_profile: dict) -> list[di
             raw = raw[start:end + 1]
         ranked_list = json.loads(raw)
         if isinstance(ranked_list, list):
-            # Merge scores back into full job objects (preserves all original fields)
             score_map = {r.get("id"): r for r in ranked_list if isinstance(r, dict) and r.get("id")}
             for job in jobs:
                 info = score_map.get(job.get("id"))
                 if info:
-                    job["match_score"] = info.get("match_score", job.get("match_score") or 70)
+                    job["match_score"] = int(info.get("match_score") or 70)
+                    # Fill in skills extracted from description if the job had none
+                    if info.get("skills_extracted") and not job.get("skills"):
+                        job["skills"] = info["skills_extracted"][:8]
+                    # Fill in experience if it was blank
+                    if info.get("experience_required") and not job.get("experience_required"):
+                        job["experience_required"] = info["experience_required"]
+                    # Upgrade seniority if extracted from description
+                    if info.get("seniority_detected") and job.get("seniority") == "Mid":
+                        job["seniority"] = info["seniority_detected"]
                     if info.get("why_match"):
                         job["why_match"] = info["why_match"]
                     if info.get("apply_priority"):
                         job["apply_priority"] = info["apply_priority"]
-                elif not job.get("match_score"):
-                    job["match_score"] = 60  # Default for unranked jobs
+                else:
+                    # Job ID not in ranker output — assign safe default
+                    if not job.get("match_score"):
+                        job["match_score"] = 60
         return jobs
     except Exception as e:
         logger.error(f"Ranking failed: {e}")
-        # Assign default differentiated scores if ranking fails
         for i, job in enumerate(jobs):
             if not job.get("match_score"):
                 job["match_score"] = max(50, 80 - i * 5)
