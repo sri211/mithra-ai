@@ -63,14 +63,24 @@ Output ONLY a valid JSON array with EXACTLY 8 jobs (no other text, no markdown):
   }
 ]"""
 
-SYSTEM_JOB_RANKER = """You are a career advisor. Given a user's profile and job listings, rank them by fit.
-For each job, add:
-- match_score: 0-100 based on skills/experience fit
-- why_match: 2-sentence explanation
-- red_flags: any concerns
-- apply_priority: "high" | "medium" | "low"
+SYSTEM_JOB_RANKER = """You are a career advisor. Score each job by how well it fits this specific candidate.
 
-Return the enriched jobs array as JSON."""
+For EACH job in the input, return one object:
+{
+  "id": "<same id from input>",
+  "match_score": <integer 40-95 — use the FULL range, differentiate clearly>,
+  "why_match": "One sentence explaining the fit",
+  "apply_priority": "high|medium|low"
+}
+
+Scoring rules:
+- 85-95: Near-perfect skills + seniority + domain match
+- 70-84: Good match, minor gaps
+- 55-69: Partial match, notable skill gaps
+- 40-54: Weak match, different domain or level
+
+IMPORTANT: Do NOT cluster all scores in a narrow range. Differentiate based on real fit.
+Return ONLY a JSON array, no other text."""
 
 SYSTEM_RESUME_JOB_GENERATOR = """You are India's most precise job-matching AI. A candidate's complete resume profile is provided. Generate EXACTLY 8 job listings that this specific candidate would be an excellent match for.
 
@@ -321,11 +331,31 @@ async def fetch_jobs_from_jsearch(
             apply_link = rj.get("job_apply_link", "")
             description = rj.get("job_description", "")[:400]
             posted_dt = rj.get("job_posted_at_datetime_utc", "")
-            sal_min = rj.get("job_min_salary") or 0
-            sal_max = rj.get("job_max_salary") or 0
-            sal_currency = rj.get("job_salary_currency") or "INR"
             emp_type = rj.get("job_employment_type") or "Full-time"
             required_skills = rj.get("job_required_skills") or []
+
+            # Normalize salary to annual INR
+            sal_min_raw = float(rj.get("job_min_salary") or 0)
+            sal_max_raw = float(rj.get("job_max_salary") or 0)
+            sal_period = (rj.get("job_salary_period") or "").upper()
+            sal_currency = (rj.get("job_salary_currency") or "INR").upper()
+
+            if sal_period in ("MONTH", "MONTHLY"):
+                sal_min_raw *= 12
+                sal_max_raw *= 12
+            elif sal_period in ("HOUR", "HOURLY"):
+                sal_min_raw *= 2080  # 40h/week × 52 weeks
+                sal_max_raw *= 2080
+            elif sal_period in ("WEEK", "WEEKLY"):
+                sal_min_raw *= 52
+                sal_max_raw *= 52
+
+            if sal_currency in ("USD", "US$"):
+                sal_min_raw *= 83
+                sal_max_raw *= 83
+
+            sal_min = int(sal_min_raw)
+            sal_max = int(sal_max_raw)
 
             # Build portal info from apply_link domain
             portal = "JSearch"
@@ -348,9 +378,9 @@ async def fetch_jobs_from_jsearch(
                 "company_logo": f"https://logo.clearbit.com/{domain}",
                 "location": f"{city}, India" if "india" not in city.lower() else city,
                 "remote": "Remote" if rj.get("job_is_remote") else "On-site",
-                "salary_min": int(sal_min) if sal_min else 0,
-                "salary_max": int(sal_max) if sal_max else 0,
-                "salary_currency": sal_currency,
+                "salary_min": sal_min,
+                "salary_max": sal_max,
+                "salary_currency": "INR",
                 "experience_required": "",
                 "posted_date": posted_dt[:10] if posted_dt else "",
                 "description": description,
@@ -360,7 +390,7 @@ async def fetch_jobs_from_jsearch(
                 "url": apply_link,
                 "job_type": emp_type,
                 "seniority": "Mid",
-                "match_score": 75,
+                "match_score": 0,  # Will be set by rank_jobs_for_profile
                 "is_real_listing": True,
             })
 
@@ -416,14 +446,51 @@ async def search_jobs(
 async def rank_jobs_for_profile(jobs: list[dict], user_profile: dict) -> list[dict]:
     if not jobs:
         return jobs
-    content = f"User profile: {json.dumps(user_profile)}\n\nJobs: {json.dumps(jobs)}"
+
+    # Send only essential fields to keep token count low
+    slim_jobs = [
+        {
+            "id": j.get("id"),
+            "title": j.get("title"),
+            "company": j.get("company"),
+            "skills": j.get("skills", []),
+            "experience_required": j.get("experience_required", ""),
+            "seniority": j.get("seniority", ""),
+            "description": (j.get("description") or "")[:150],
+        }
+        for j in jobs
+    ]
+
+    content = f"Candidate profile:\n{json.dumps(user_profile)}\n\nJob listings:\n{json.dumps(slim_jobs)}"
     messages = [{"role": "user", "content": content}]
     try:
-        raw = await complete_claude_json(SYSTEM_JOB_RANKER, messages, max_tokens=2000)
-        ranked = json.loads(raw)
-        return ranked if isinstance(ranked, list) else jobs
+        raw = await complete_claude_json(SYSTEM_JOB_RANKER, messages, max_tokens=1500)
+        raw = raw.strip()
+        start = raw.find("[")
+        end = raw.rfind("]")
+        if start != -1 and end > start:
+            raw = raw[start:end + 1]
+        ranked_list = json.loads(raw)
+        if isinstance(ranked_list, list):
+            # Merge scores back into full job objects (preserves all original fields)
+            score_map = {r.get("id"): r for r in ranked_list if isinstance(r, dict) and r.get("id")}
+            for job in jobs:
+                info = score_map.get(job.get("id"))
+                if info:
+                    job["match_score"] = info.get("match_score", job.get("match_score") or 70)
+                    if info.get("why_match"):
+                        job["why_match"] = info["why_match"]
+                    if info.get("apply_priority"):
+                        job["apply_priority"] = info["apply_priority"]
+                elif not job.get("match_score"):
+                    job["match_score"] = 60  # Default for unranked jobs
+        return jobs
     except Exception as e:
         logger.error(f"Ranking failed: {e}")
+        # Assign default differentiated scores if ranking fails
+        for i, job in enumerate(jobs):
+            if not job.get("match_score"):
+                job["match_score"] = max(50, 80 - i * 5)
         return jobs
 
 

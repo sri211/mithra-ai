@@ -29,10 +29,27 @@ async def search(
     db: AsyncSession = Depends(get_db),
     current_user=Depends(get_optional_user),
 ):
-    resume_matched = False
+    has_query = bool(req.query and req.query.strip())
+    has_resume = bool(req.resume_profile and req.resume_profile.get("personal"))
+    jobs: list[dict] = []
 
-    # Resume-based search: full resume → generate perfectly matched jobs via Claude
-    if req.resume_profile and req.resume_profile.get("personal"):
+    if has_query:
+        # Text search: fetch relevant jobs by query, then rank by resume for personalised scores
+        jobs = await search_jobs(
+            req.query, req.location, req.experience_years,
+            req.salary_min, req.job_type, req.remote, req.portals,
+        )
+        if jobs and has_resume:
+            profile = {
+                "title": req.resume_profile.get("personal", {}).get("title", ""),
+                "skills": req.resume_profile.get("skills", {}),
+                "experience": req.resume_profile.get("experience", [])[:3],
+                "summary": req.resume_profile.get("summary", ""),
+            }
+            jobs = await rank_jobs_for_profile(jobs, profile)
+
+    elif has_resume:
+        # No query: pure resume-driven generation — every job hand-picked for this candidate
         jobs = await generate_jobs_with_resume(
             req.resume_profile,
             location=req.location,
@@ -40,43 +57,39 @@ async def search(
             remote=req.remote,
             salary_min=req.salary_min,
         )
-        if jobs:
-            resume_matched = True
-        else:
-            # Claude failed — fall back to standard search with resume title as query
-            title = req.resume_profile.get("personal", {}).get("title", "") or req.query
+        if not jobs:
+            # Claude failed — fall back to title search + ranking
+            title = req.resume_profile.get("personal", {}).get("title", "software engineer")
             jobs = await search_jobs(title, req.location, req.experience_years, req.salary_min, req.job_type, req.remote, req.portals)
+            if jobs:
+                profile = {
+                    "title": req.resume_profile.get("personal", {}).get("title", ""),
+                    "skills": req.resume_profile.get("skills", {}),
+                    "experience": req.resume_profile.get("experience", [])[:3],
+                }
+                jobs = await rank_jobs_for_profile(jobs, profile)
     else:
         jobs = await search_jobs(
-            req.query, req.location, req.experience_years,
-            req.salary_min, req.job_type, req.remote, req.portals
+            req.query or "software engineer", req.location, req.experience_years,
+            req.salary_min, req.job_type, req.remote, req.portals,
         )
 
-    # If jobs weren't resume-matched (came from JSearch/fallback), rank by profile
-    if not resume_matched and jobs:
-        profile = req.user_profile or (
-            {
-                "title": req.resume_profile.get("personal", {}).get("title", ""),
-                "skills": req.resume_profile.get("skills", {}),
-                "experience": req.resume_profile.get("experience", [])[:2],
-            }
-            if req.resume_profile
-            else {}
-        )
-        if profile:
-            jobs = await rank_jobs_for_profile(jobs, profile)
+    # Sort by match_score descending so best matches are always first
+    if jobs:
+        jobs = sorted(jobs, key=lambda j: j.get("match_score") or 0, reverse=True)
 
-    # Save search to DB when user is authenticated
     if current_user:
-        effective_query = req.query or req.resume_profile.get("personal", {}).get("title", "resume-match")
-        job_search = JobSearch(
+        effective_query = req.query or (
+            req.resume_profile.get("personal", {}).get("title", "resume-match")
+            if has_resume else "search"
+        )
+        db.add(JobSearch(
             id=str(uuid.uuid4()),
             user_id=current_user.id,
             query=effective_query,
             location=req.location or None,
             results_json={"count": len(jobs)},
-        )
-        db.add(job_search)
+        ))
         await db.commit()
 
     return {"jobs": jobs, "total": len(jobs)}
