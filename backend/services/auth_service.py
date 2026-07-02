@@ -8,7 +8,7 @@ from jose import JWTError, jwt
 
 JWT_SECRET = os.getenv("JWT_SECRET", "mithra_ai_jwt_secret_2026_very_long_random_string")
 JWT_ALGORITHM = os.getenv("JWT_ALGORITHM", "HS256")
-ACCESS_TOKEN_EXPIRE_DAYS = 7
+ACCESS_TOKEN_EXPIRE_DAYS = 30
 REFRESH_TOKEN_EXPIRE_DAYS = 90
 
 
