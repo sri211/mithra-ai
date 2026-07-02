@@ -63,31 +63,35 @@ Output ONLY a valid JSON array with EXACTLY 8 jobs (no other text, no markdown):
   }
 ]"""
 
-SYSTEM_JOB_RANKER = """You are a career advisor. For each job listing, do TWO things:
-1. Extract structured data from the job description (since many listings lack structured fields)
-2. Score the job against the candidate's profile
+SYSTEM_JOB_RANKER = """You are a career advisor. For EACH job listing, compare the candidate's resume to the job requirements and return a structured match analysis.
 
-For EACH job return one JSON object:
+Return a JSON array — one object per job:
 {
   "id": "<same id from input>",
   "match_score": <integer 40-95>,
-  "skills_extracted": ["skill1", "skill2", ...],
-  "experience_required": "X-Y years",
+  "skills_matched": ["skills candidate has that the job needs", ...],
+  "skills_missing": ["skills job requires that candidate lacks", ...],
+  "skills_extracted": ["ALL skills/tools mentioned in description"],
+  "experience_required": "X-Y years extracted from description",
+  "experience_match": "e.g. 'Job needs 3-5 yrs, you have ~4 yrs — good fit'",
+  "domain_match": "e.g. 'Finance domain aligns with your background'",
   "seniority_detected": "Entry|Mid|Senior|Lead|Director",
-  "why_match": "One sentence explaining the fit or mismatch",
   "apply_priority": "high|medium|low"
 }
 
-Extraction rules:
-- skills_extracted: Pull ALL skills, tools, technologies, qualifications from the description text
-- experience_required: Extract exact experience requirement (e.g., "3-5 years") from description text
-- seniority_detected: Infer from title + requirements (entry=0-2yr, mid=2-5yr, senior=5-8yr, lead=8yr+)
+Rules:
+- skills_matched: only skills the CANDIDATE ACTUALLY HAS (from their profile) AND that appear in the job
+- skills_missing: skills explicitly required by the job that the candidate does NOT have
+- skills_extracted: everything mentioned in the description (for empty-skills JSearch jobs)
+- experience_required: extract literally from description text (e.g. "MBA with 3-4 years")
+- experience_match: compare job requirement to candidate's actual experience, state clearly
+- domain_match: is the industry/function a strong match, partial match, or mismatch?
 
-Scoring rules (use the FULL 40-95 range, differentiate clearly):
-- 85-95: Skills, domain, seniority all match candidate profile
-- 70-84: Good domain match, minor skill gaps
-- 55-69: Partial match, notable gaps in domain or level
-- 40-54: Different domain or significantly over/under qualified
+Scoring (use the FULL 40-95 range — DO NOT cluster scores):
+- 85-95: Skills, domain, seniority all align — strong match
+- 70-84: Good domain/function match, minor skill gaps
+- 55-69: Partial match — different sub-domain or missing key skills
+- 40-54: Weak match — wrong domain or significant qualification gap
 
 Return ONLY a valid JSON array, no other text."""
 
@@ -399,7 +403,7 @@ async def fetch_jobs_from_jsearch(
                 "url": apply_link,
                 "job_type": emp_type,
                 "seniority": "Mid",
-                "match_score": 0,  # Will be set by rank_jobs_for_profile
+                "match_score": 70,  # Base score; overwritten by rank_jobs_for_profile when resume is available
                 "is_real_listing": True,
             })
 
@@ -496,29 +500,42 @@ async def rank_jobs_for_profile(jobs: list[dict], user_profile: dict) -> list[di
             for job in jobs:
                 info = score_map.get(job.get("id"))
                 if info:
-                    job["match_score"] = int(info.get("match_score") or 70)
-                    # Fill in skills extracted from description if the job had none
+                    raw_score = info.get("match_score")
+                    job["match_score"] = int(raw_score) if raw_score and int(raw_score) > 0 else 65
+                    # Fill skills from description if job had none
                     if info.get("skills_extracted") and not job.get("skills"):
                         job["skills"] = info["skills_extracted"][:8]
-                    # Fill in experience if it was blank
+                    # Fill experience if blank
                     if info.get("experience_required") and not job.get("experience_required"):
                         job["experience_required"] = info["experience_required"]
-                    # Upgrade seniority if extracted from description
+                    # Upgrade seniority if inferred from description
                     if info.get("seniority_detected") and job.get("seniority") == "Mid":
                         job["seniority"] = info["seniority_detected"]
-                    if info.get("why_match"):
-                        job["why_match"] = info["why_match"]
+                    # Store match breakdown for UI display
+                    if info.get("skills_matched"):
+                        job["skills_matched"] = info["skills_matched"]
+                    if info.get("skills_missing"):
+                        job["skills_missing"] = info["skills_missing"]
+                    if info.get("experience_match"):
+                        job["experience_match"] = info["experience_match"]
+                    if info.get("domain_match"):
+                        job["domain_match"] = info["domain_match"]
                     if info.get("apply_priority"):
                         job["apply_priority"] = info["apply_priority"]
                 else:
-                    # Job ID not in ranker output — assign safe default
-                    if not job.get("match_score"):
+                    # Not in ranker output — keep base score (70) or assign 60
+                    if not (job.get("match_score") or 0) > 0:
                         job["match_score"] = 60
+        else:
+            # Claude returned non-list — apply differentiated fallback
+            for i, job in enumerate(jobs):
+                if not (job.get("match_score") or 0) > 0:
+                    job["match_score"] = max(50, 80 - i * 5)
         return jobs
     except Exception as e:
         logger.error(f"Ranking failed: {e}")
         for i, job in enumerate(jobs):
-            if not job.get("match_score"):
+            if not (job.get("match_score") or 0) > 0:
                 job["match_score"] = max(50, 80 - i * 5)
         return jobs
 

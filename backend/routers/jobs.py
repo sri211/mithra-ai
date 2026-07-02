@@ -74,9 +74,13 @@ async def search(
             req.salary_min, req.job_type, req.remote, req.portals,
         )
 
+    # Guarantee every job has a visible score (never 0 or missing)
+    for i, job in enumerate(jobs):
+        if not (job.get("match_score") or 0) > 0:
+            job["match_score"] = max(50, 75 - i * 3)
+
     # Sort by match_score descending so best matches are always first
-    if jobs:
-        jobs = sorted(jobs, key=lambda j: j.get("match_score") or 0, reverse=True)
+    jobs = sorted(jobs, key=lambda j: j.get("match_score") or 0, reverse=True)
 
     if current_user:
         effective_query = req.query or (
