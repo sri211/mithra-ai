@@ -1,4 +1,3 @@
-version: "3.9"
 services:
   api:
     build: .
@@ -10,4 +9,6 @@ services:
       - FRONTEND_URL=https://mithraai.in
     restart: unless-stopped
     volumes:
-      - ./mithra.db:/app/mithra.db
+      # DATABASE_URL points at /app/data/mithra.db — this mount is what makes
+      # user data survive container rebuilds. Do not remove.
+      - ./data:/app/data
