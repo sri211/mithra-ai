@@ -81,16 +81,29 @@ SYSTEM_JD_PARSER = """Extract the following from this job description as JSON:
 
 
 async def parse_job_description(jd_text: str) -> dict:
+    from services.ai_cache import cache_get, cache_set
+    cached = await cache_get("jd_analysis", jd_text[:2000])
+    if cached and isinstance(cached, dict):
+        return cached
     messages = [{"role": "user", "content": jd_text}]
     raw = await complete_claude_json(SYSTEM_JD_PARSER, messages)
-    return json.loads(raw)
+    parsed = json.loads(raw)
+    await cache_set("jd_analysis", parsed, 24 * 7, jd_text[:2000])
+    return parsed
 
 
 async def get_company_intelligence(company: str, role: str) -> str:
-    """Fetch deep hiring intelligence for a specific company and role."""
+    """Fetch deep hiring intelligence for a specific company and role. Cached 30 days —
+    every user targeting the same company+role shares one Claude call."""
+    from services.ai_cache import cache_get, cache_set
+    cached = await cache_get("company_intel", company, role)
+    if cached and isinstance(cached, str):
+        return cached
     content = f"Company: {company}\nRole: {role}\n\nProvide the structured company hiring intelligence report."
     messages = [{"role": "user", "content": content}]
-    return await complete_claude(SYSTEM_COMPANY_INTELLIGENCE, messages, max_tokens=1200)
+    result = await complete_claude(SYSTEM_COMPANY_INTELLIGENCE, messages, max_tokens=1200)
+    await cache_set("company_intel", result, 24 * 30, company, role)
+    return result
 
 
 async def adapt_resume(resume: dict, jd_text: str, jd_parsed: dict, company_name: str = "", role_name: str = "") -> dict:
@@ -161,7 +174,8 @@ Adapt this resume to maximize ATS score and interview chances for this specific 
 REMINDER: The `original` field in every suggested_change must be copied VERBATIM from the "ACTUAL CURRENT ..." lines above."""
 
     messages = [{"role": "user", "content": content}]
-    raw = await complete_claude_json(SYSTEM_ADAPTOR, messages, max_tokens=8192)
+    # Smart tier: adaptation writing quality is the product's flagship feature
+    raw = await complete_claude_json(SYSTEM_ADAPTOR, messages, max_tokens=8192, tier="smart")
     try:
         return json.loads(raw)
     except json.JSONDecodeError as e:
@@ -178,7 +192,7 @@ Do NOT use generic phrases like 'I am writing to apply...'"""
 
     content = f"Resume:\n{json.dumps(resume, indent=2)}\n\nJob Description:\n{jd_text}"
     messages = [{"role": "user", "content": content}]
-    return await complete_claude(system, messages, max_tokens=600)
+    return await complete_claude(system, messages, max_tokens=600, tier="smart")
 
 
 async def score_resume_vs_jd(resume: dict, jd_text: str) -> dict:

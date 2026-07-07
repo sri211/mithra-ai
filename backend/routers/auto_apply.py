@@ -107,6 +107,27 @@ async def _detect_blocker(page) -> str:
     except: pass
     return ""
 
+async def _try_click_submit(page) -> bool:
+    """Click the final submit button after form fill (assisted-apply confirm step)."""
+    for sel in [
+        'button[type="submit"]:visible',
+        'button:has-text("Submit application")', 'button:has-text("Submit Application")',
+        'button:has-text("Submit")', 'button:has-text("Send application")',
+        'button:has-text("Apply")', 'input[type="submit"]',
+        '[data-automation="submit-button"]',
+    ]:
+        try:
+            el = page.locator(sel).first
+            if await el.is_visible(timeout=800):
+                await el.scroll_into_view_if_needed(timeout=1000)
+                await el.click(timeout=2500)
+                await page.wait_for_timeout(2500)
+                return True
+        except Exception:
+            continue
+    return False
+
+
 async def _try_click_apply(page) -> bool:
     for sel in [
         '.jobs-apply-button','button.jobs-apply-button',
@@ -241,8 +262,10 @@ async def _fill_otp(page, otp: str):
 
 # ── Playwright submit session (runs as background task) ───────────────────────
 
-async def _run_submit_session(session_id: str, req: AutoSubmitRequest,
-                               user: User, db: AsyncSession):
+async def _run_submit_session(session_id: str, req: AutoSubmitRequest, user: User):
+    # NOTE: never use the request-scoped DB session here — it's closed once the
+    # /submit/start request returns. Open fresh sessions from AsyncSessionLocal.
+    from db.database import AsyncSessionLocal
     session   = _sessions.get(session_id)
     if not session: return
     q: asyncio.Queue = session["queue"]
@@ -284,14 +307,15 @@ async def _run_submit_session(session_id: str, req: AutoSubmitRequest,
         page = await context.new_page()
         portal = detect_portal(req.job_url)
 
-        # ── Check for saved credentials ───────────────────────────────────────
-        cred_row = await db.execute(
-            select(PortalCredential).where(
-                PortalCredential.user_id == user.id,
-                PortalCredential.portal  == portal,
+        # ── Check for saved credentials (fresh DB session — background task) ──
+        async with AsyncSessionLocal() as cred_db:
+            cred_row = await cred_db.execute(
+                select(PortalCredential).where(
+                    PortalCredential.user_id == user.id,
+                    PortalCredential.portal  == portal,
+                )
             )
-        )
-        cred = cred_row.scalar_one_or_none()
+            cred = cred_row.scalar_one_or_none()
 
         # ── Navigate to job URL ───────────────────────────────────────────────
         await emit({"type":"status","message":"Opening job page…"})
@@ -415,14 +439,53 @@ async def _run_submit_session(session_id: str, req: AutoSubmitRequest,
         await page.wait_for_timeout(500)
         filled = await _fill_form(page, req.profile)
 
+        # ── Assisted confirm: show the filled form, wait for one-tap approval ──
         ss = await _screenshot(page)
-        msg = (f"✅ Auto-filled {filled} field(s). Review the form and click Submit on the portal tab."
-               if filled > 0
-               else "Form opened — couldn't auto-fill this portal's fields. Fill manually and submit.")
+        await emit({
+            "type": "input_needed", "field": "confirm_submit",
+            "message": (f"Filled {filled} field(s). Review the screenshot — "
+                        "tap Confirm to submit, or Cancel to finish manually."),
+            "screenshot": ss,
+        })
+        answer = await wait_input(300)
 
-        await emit({"type":"done","success":True,"fields_filled":filled,
-                    "screenshot":ss,"message":msg,"apply_url":req.job_url,
-                    "portal":portal.title()})
+        if answer and answer.strip().lower() in ("submit", "confirm", "yes", "y", "ok"):
+            await emit({"type": "status", "message": "Submitting application…"})
+            submitted = await _try_click_submit(page)
+            await page.wait_for_timeout(1500)
+            ss = await _screenshot(page)
+
+            if submitted:
+                # Record in tracker automatically (fresh DB session)
+                try:
+                    async with AsyncSessionLocal() as track_db:
+                        dup = await track_db.execute(select(JobApplication).where(
+                            JobApplication.user_id == user.id,
+                            JobApplication.job_id == req.job_id))
+                        if not dup.scalar_one_or_none():
+                            track_db.add(JobApplication(
+                                id=str(uuid.uuid4()), user_id=user.id, job_id=req.job_id,
+                                company=req.company, role=req.role, job_url=req.job_url,
+                                platform=portal, match_score=req.match_score,
+                                status="applied", notes="Auto-submitted via Mithra AI"))
+                            await track_db.commit()
+                except Exception:
+                    pass
+                await emit({"type":"done","success":True,"fields_filled":filled,
+                            "screenshot":ss,
+                            "message":"✅ Application submitted and added to your tracker!",
+                            "apply_url":req.job_url,"portal":portal.title()})
+            else:
+                await emit({"type":"done","success":False,"fields_filled":filled,
+                            "screenshot":ss,
+                            "message":"Couldn't find the submit button — finish manually with 'Open Application'.",
+                            "apply_url":req.job_url,"portal":portal.title()})
+        else:
+            ss = await _screenshot(page)
+            await emit({"type":"done","success":True,"fields_filled":filled,
+                        "screenshot":ss,
+                        "message":f"Auto-filled {filled} field(s). Use 'Open Application' to review and submit manually.",
+                        "apply_url":req.job_url,"portal":portal.title()})
 
     except Exception as e:
         ss = await _screenshot(page) if browser else ""
@@ -577,8 +640,8 @@ async def start_submit(req: AutoSubmitRequest,
         "input_value": None,
         "user_id": current_user.id,
     }
-    # Run Playwright in background — keep DB session alive by passing user object
-    asyncio.create_task(_run_submit_session(sid, req, current_user, db))
+    # Run Playwright in background — task opens its own DB sessions
+    asyncio.create_task(_run_submit_session(sid, req, current_user))
     return {"session_id": sid}
 
 @router.get("/submit/stream/{session_id}")

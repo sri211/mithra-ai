@@ -6,7 +6,8 @@ from pydantic import BaseModel
 from db.database import get_db
 from db.models import JobSearch
 from middleware.auth import get_optional_user
-from agents.job_finder_agent import search_jobs, rank_jobs_for_profile, get_job_details, generate_jobs_with_resume
+from agents.job_finder_agent import get_job_pool, get_job_details
+from services.match_scorer import score_jobs_for_resume
 
 router = APIRouter()
 
@@ -23,70 +24,55 @@ class JobSearchRequest(BaseModel):
     resume_profile: dict = {}
 
 
+def _query_from_resume(resume: dict) -> str:
+    personal = resume.get("personal", {}) or {}
+    title = personal.get("title", "")
+    if title:
+        return title
+    exps = resume.get("experience") or []
+    if exps:
+        return exps[0].get("role", "") or "software engineer"
+    return "software engineer"
+
+
 @router.post("/search")
 async def search(
     req: JobSearchRequest,
     db: AsyncSession = Depends(get_db),
     current_user=Depends(get_optional_user),
 ):
-    has_query = bool(req.query and req.query.strip())
     has_resume = bool(req.resume_profile and req.resume_profile.get("personal"))
-    jobs: list[dict] = []
 
-    if has_query:
-        # Text search: fetch relevant jobs by query, then rank by resume for personalised scores
-        jobs = await search_jobs(
-            req.query, req.location, req.experience_years,
-            req.salary_min, req.job_type, req.remote, req.portals,
-        )
-        if jobs and has_resume:
-            profile = {
-                "title": req.resume_profile.get("personal", {}).get("title", ""),
-                "skills": req.resume_profile.get("skills", {}),
-                "experience": req.resume_profile.get("experience", [])[:3],
-                "summary": req.resume_profile.get("summary", ""),
-            }
-            jobs = await rank_jobs_for_profile(jobs, profile)
+    # Resolve the effective query: explicit text, else derived from resume
+    effective_query = (req.query or "").strip()
+    if not effective_query and has_resume:
+        effective_query = _query_from_resume(req.resume_profile)
+    if not effective_query:
+        effective_query = "software engineer"
 
-    elif has_resume:
-        # No query: pure resume-driven generation — every job hand-picked for this candidate
-        jobs = await generate_jobs_with_resume(
-            req.resume_profile,
-            location=req.location,
-            experience_years=req.experience_years,
-            remote=req.remote,
-            salary_min=req.salary_min,
-        )
-        if not jobs:
-            # Claude failed — fall back to title search + ranking
-            title = req.resume_profile.get("personal", {}).get("title", "software engineer")
-            jobs = await search_jobs(title, req.location, req.experience_years, req.salary_min, req.job_type, req.remote, req.portals)
-            if jobs:
-                profile = {
-                    "title": req.resume_profile.get("personal", {}).get("title", ""),
-                    "skills": req.resume_profile.get("skills", {}),
-                    "experience": req.resume_profile.get("experience", [])[:3],
-                }
-                jobs = await rank_jobs_for_profile(jobs, profile)
+    # Shared cached pool: one external fetch per query+location per 24h serves all users
+    jobs = await get_job_pool(effective_query, req.location)
+
+    # Per-user filters (free, local)
+    if req.remote and req.remote != "All":
+        filtered = [j for j in jobs if (j.get("remote") or "").lower() == req.remote.lower()]
+        if len(filtered) >= 3:
+            jobs = filtered
+    if req.salary_min:
+        filtered = [j for j in jobs if (j.get("salary_max") or 0) == 0 or (j.get("salary_max") or 0) >= req.salary_min]
+        if len(filtered) >= 3:
+            jobs = filtered
+
+    # Local deterministic resume scoring — zero API cost, consistent results
+    if has_resume:
+        jobs = score_jobs_for_resume(jobs, req.resume_profile)
     else:
-        jobs = await search_jobs(
-            req.query or "software engineer", req.location, req.experience_years,
-            req.salary_min, req.job_type, req.remote, req.portals,
-        )
-
-    # Guarantee every job has a visible score (never 0 or missing)
-    for i, job in enumerate(jobs):
-        if not (job.get("match_score") or 0) > 0:
-            job["match_score"] = max(50, 75 - i * 3)
-
-    # Sort by match_score descending so best matches are always first
-    jobs = sorted(jobs, key=lambda j: j.get("match_score") or 0, reverse=True)
+        for i, job in enumerate(jobs):
+            if not (job.get("match_score") or 0) > 0:
+                job["match_score"] = max(55, 78 - i * 3)
+        jobs = sorted(jobs, key=lambda j: j.get("match_score") or 0, reverse=True)
 
     if current_user:
-        effective_query = req.query or (
-            req.resume_profile.get("personal", {}).get("title", "resume-match")
-            if has_resume else "search"
-        )
         db.add(JobSearch(
             id=str(uuid.uuid4()),
             user_id=current_user.id,

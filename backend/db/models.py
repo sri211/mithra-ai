@@ -143,6 +143,17 @@ class PortalCredential(Base):
     user = relationship("User", back_populates="portal_credentials")
 
 
+class AICache(Base):
+    """Shared response cache — one Claude/JSearch call serves every user who asks the same thing."""
+    __tablename__ = "ai_cache"
+
+    key = Column(String, primary_key=True)              # sha256 of namespace + normalized input
+    namespace = Column(String, nullable=False, index=True)  # job_search | interview_qs | company_intel | ...
+    value_json = Column(JSON, nullable=False)
+    expires_at = Column(DateTime, nullable=False, index=True)
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+
+
 class AnalyticsEvent(Base):
     __tablename__ = "analytics_events"
 

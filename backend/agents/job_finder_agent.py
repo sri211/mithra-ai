@@ -1,5 +1,10 @@
 """
 Job Finder Agent — fetches real jobs via JSearch API (RapidAPI), falls back to Claude generation.
+
+Cost design: get_job_pool() is the only entry point the router uses. It serves a
+shared 24h cache — one JSearch fetch (and at most one cheap Haiku fallback call)
+per query+location per day, shared across every user. Match scoring happens
+locally in services/match_scorer.py at zero API cost.
 """
 import json
 import re
@@ -7,6 +12,7 @@ import uuid
 import os
 import httpx
 from services.claude_service import complete_claude_json
+from services.ai_cache import cache_get, cache_set
 from loguru import logger
 
 RAPIDAPI_KEY = os.getenv("RAPIDAPI_KEY", "")
@@ -413,6 +419,46 @@ async def fetch_jobs_from_jsearch(
     except Exception as e:
         logger.error(f"JSearch API failed: {e}")
         return []
+
+
+async def get_job_pool(query: str, location: str = "") -> list[dict]:
+    """Shared cached job pool. One external fetch per query+location per 24h serves all users.
+
+    Returns jobs WITHOUT per-user scores — the router scores them locally per resume.
+    """
+    cached = await cache_get("jobs", query, location)
+    if cached and isinstance(cached, list) and len(cached) > 0:
+        return cached
+
+    jobs: list[dict] = []
+
+    # 1. Real listings first
+    if RAPIDAPI_KEY:
+        jobs = await fetch_jobs_from_jsearch(query, location)
+
+    # 2. Supplement to 8 with Haiku generation (cheap; also cached with the pool)
+    if len(jobs) < 8:
+        needed = 8 - len(jobs)
+        extra = await generate_jobs_with_claude(query, location)
+        for job in extra[:needed]:
+            job["is_real_listing"] = False
+            if not job.get("url") or job["url"] in ("#", ""):
+                title_enc = job.get("title", query).replace(" ", "+")
+                company_enc = job.get("company", "").replace(" ", "+")
+                job["url"] = f"https://www.google.com/search?q={title_enc}+{company_enc}+jobs"
+            jobs.append(job)
+
+    # 3. Static fallback if everything failed
+    if not jobs:
+        jobs = [dict(j) for j in FALLBACK_JOBS]
+
+    # Strip any generation-time scores — scoring is per-user, done by the router
+    for job in jobs:
+        job.pop("match_score", None)
+        job.pop("why_match", None)
+
+    await cache_set("jobs", jobs, 24, query, location)
+    return jobs
 
 
 async def search_jobs(

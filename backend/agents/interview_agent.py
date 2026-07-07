@@ -97,6 +97,13 @@ async def generate_questions(
     difficulty: str,
     count: int = 7,
 ) -> dict:
+    # Question banks are cached 30d per role+company+type+difficulty — one generation
+    # serves every user who preps the same interview
+    from services.ai_cache import cache_get, cache_set
+    cached = await cache_get("interview_qs", role, company, interview_type, difficulty)
+    if cached and isinstance(cached, dict) and cached.get("questions"):
+        return cached
+
     content = (
         f"Role: {role}\n"
         f"Company: {company or 'a top tech company'}\n"
@@ -112,6 +119,7 @@ async def generate_questions(
         result = json.loads(clean)
         if not result.get("questions"):
             raise ValueError("No questions in response")
+        await cache_set("interview_qs", result, 24 * 30, role, company, interview_type, difficulty)
         return result
     except Exception as e:
         from loguru import logger
