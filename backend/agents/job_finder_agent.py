@@ -223,7 +223,11 @@ async def generate_jobs_with_claude(
             if end > start:
                 raw = raw[start:end+1]
         jobs = json.loads(raw)
-        if isinstance(jobs, list) and len(jobs) > 0:
+        if isinstance(jobs, dict):
+            jobs = jobs.get("jobs") or jobs.get("listings") or []
+        if isinstance(jobs, list):
+            jobs = [j for j in jobs if isinstance(j, dict)]
+        if jobs:
             # Ensure IDs are unique
             for job in jobs:
                 if not job.get("id") or job["id"] == "job_<unique_6char>":
@@ -234,7 +238,7 @@ async def generate_jobs_with_claude(
                     job["company_logo"] = f"https://logo.clearbit.com/{domain}"
             return jobs
     except Exception as e:
-        logger.error(f"Claude job generation failed: {e}")
+        logger.error(f"Claude job generation failed: {e!r}")
     return []
 
 
@@ -303,7 +307,11 @@ async def generate_jobs_with_resume(
             if end > start:
                 raw = raw[start : end + 1]
         jobs = json.loads(raw)
-        if isinstance(jobs, list) and len(jobs) > 0:
+        if isinstance(jobs, dict):
+            jobs = jobs.get("jobs") or jobs.get("listings") or []
+        if isinstance(jobs, list):
+            jobs = [j for j in jobs if isinstance(j, dict)]
+        if jobs:
             for job in jobs:
                 if not job.get("id") or job["id"] == "job_<unique_6char>":
                     job["id"] = f"job_{uuid.uuid4().hex[:6]}"
@@ -312,7 +320,7 @@ async def generate_jobs_with_resume(
                     job["company_logo"] = f"https://logo.clearbit.com/{domain}"
             return jobs
     except Exception as e:
-        logger.error(f"Resume-based job generation failed: {e}")
+        logger.error(f"Resume-based job generation failed: {e!r}")
     return []
 
 
@@ -333,7 +341,7 @@ async def fetch_jobs_from_jsearch(
     }
 
     try:
-        async with httpx.AsyncClient(timeout=12.0) as client:
+        async with httpx.AsyncClient(timeout=25.0) as client:
             resp = await client.get(url, params=params, headers=headers)
             resp.raise_for_status()
             data = resp.json()
@@ -417,7 +425,7 @@ async def fetch_jobs_from_jsearch(
         return jobs
 
     except Exception as e:
-        logger.error(f"JSearch API failed: {e}")
+        logger.error(f"JSearch API failed: {e!r}")
         return []
 
 
@@ -448,16 +456,18 @@ async def get_job_pool(query: str, location: str = "") -> list[dict]:
                 job["url"] = f"https://www.google.com/search?q={title_enc}+{company_enc}+jobs"
             jobs.append(job)
 
-    # 3. Static fallback if everything failed
+    # 3. Static fallback if everything failed — do NOT cache failures
     if not jobs:
-        jobs = [dict(j) for j in FALLBACK_JOBS]
+        return [dict(j) for j in FALLBACK_JOBS]
 
     # Strip any generation-time scores — scoring is per-user, done by the router
     for job in jobs:
         job.pop("match_score", None)
         job.pop("why_match", None)
 
-    await cache_set("jobs", jobs, 24, query, location)
+    # Full pools cache 24h; thin results retry sooner
+    ttl = 24 if len(jobs) >= 5 else 1
+    await cache_set("jobs", jobs, ttl, query, location)
     return jobs
 
 
