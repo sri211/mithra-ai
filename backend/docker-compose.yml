@@ -2,7 +2,9 @@ services:
   api:
     build: .
     ports:
-      - "8000:8000"
+      # Host 8001 — nginx proxies api.mithraai.in to localhost:8001
+      # (host port 8000 is occupied by an unrelated process)
+      - "8001:8000"
     env_file:
       - .env
     environment:
