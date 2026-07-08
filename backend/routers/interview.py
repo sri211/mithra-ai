@@ -1,8 +1,10 @@
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from agents.interview_agent import generate_questions, evaluate_answer, stream_coaching, generate_study_plan
 import json
+
+from services.credits import charge_action
 
 router = APIRouter()
 
@@ -33,19 +35,19 @@ class StudyPlanRequest(BaseModel):
     weak_areas: list[str] = []
 
 
-@router.post("/questions")
+@router.post("/questions", dependencies=[Depends(charge_action("interview_session"))])
 async def get_questions(req: QuestionRequest):
     result = await generate_questions(req.role, req.company, req.interview_type, req.difficulty, req.count)
     return result
 
 
-@router.post("/evaluate")
+@router.post("/evaluate", dependencies=[Depends(charge_action("interview_feedback"))])
 async def evaluate(req: EvaluateRequest):
     result = await evaluate_answer(req.question, req.answer, req.role)
     return result
 
 
-@router.post("/coach/stream")
+@router.post("/coach/stream", dependencies=[Depends(charge_action("chat_message"))])
 async def coach_stream(req: CoachRequest):
     async def generate():
         async for chunk in stream_coaching(req.question, req.answer, req.history):
@@ -54,7 +56,7 @@ async def coach_stream(req: CoachRequest):
     return StreamingResponse(generate(), media_type="text/event-stream")
 
 
-@router.post("/study-plan")
+@router.post("/study-plan", dependencies=[Depends(charge_action("interview_feedback"))])
 async def study_plan(req: StudyPlanRequest):
     plan = await generate_study_plan(req.role, req.timeline_days, req.weak_areas)
     return {"plan": plan}

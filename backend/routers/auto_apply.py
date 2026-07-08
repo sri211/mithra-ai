@@ -377,27 +377,21 @@ async def _run_submit_session(session_id: str, req: AutoSubmitRequest, user: Use
 
                 else:  # failed
                     ss = await _screenshot(page)
-                    await emit({
-                        "type":"input_needed","field":"credentials_wrong",
-                        "message":f"Saved {portal.title()} credentials didn't work — "
-                                  "please update them in the settings above.",
-                        "screenshot":ss,
-                    })
                     await emit({"type":"done","success":False,"screenshot":ss,
-                                "message":"Login failed. Update your portal credentials above.",
+                                "needs_credentials":portal,
+                                "message":f"Saved {portal.title()} credentials didn't work — "
+                                          "update them and retry.",
                                 "apply_url":req.job_url})
                     return
 
             else:
-                # No credentials — ask user to add them
+                # No credentials — end session with a needs_credentials done event
+                # (a separate prompt event would be instantly replaced by done in the UI)
                 ss = await _screenshot(page)
-                await emit({
-                    "type":"needs_credentials","portal":portal,"screenshot":ss,
-                    "message":f"This job is on {portal.title()} which requires login. "
-                              f"Add your {portal.title()} credentials above to auto-login.",
-                })
                 await emit({"type":"done","success":False,"screenshot":ss,
-                            "message":f"Add your {portal.title()} credentials to enable auto-login.",
+                            "needs_credentials":portal,
+                            "message":f"This job is on {portal.title()} which requires login. "
+                                      f"Add your {portal.title()} credentials, then retry auto-apply.",
                             "apply_url":req.job_url})
                 return
 
@@ -633,6 +627,8 @@ async def delete_credentials(portal: str, db: AsyncSession = Depends(get_db),
 async def start_submit(req: AutoSubmitRequest,
                         db: AsyncSession = Depends(get_db),
                         current_user: User = Depends(get_current_user)):
+    from services.credits import charge
+    await charge(current_user, db, "auto_apply")
     sid = str(uuid.uuid4())
     _sessions[sid] = {
         "queue": asyncio.Queue(),

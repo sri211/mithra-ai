@@ -38,6 +38,32 @@ class SaveJobSearchRequest(BaseModel):
     results_json: Optional[Any] = None
 
 
+# ── Credits ───────────────────────────────────────────────────────────────────
+
+@router.get("/credits")
+async def get_credits(
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    from datetime import timedelta
+    from services.credits import ensure_period, PLAN_ALLOWANCE, CREDIT_COSTS, TOPUP_PACKS, PERIOD_DAYS
+    await ensure_period(current_user, db)
+    plan = current_user.plan.value if hasattr(current_user.plan, "value") else str(current_user.plan or "free")
+    period_start = current_user.credits_period_start
+    renews_at = (period_start + timedelta(days=PERIOD_DAYS)).isoformat() if period_start else None
+    return {
+        "balance": current_user.credits_balance or 0,
+        "allowance": PLAN_ALLOWANCE.get(plan, 30),
+        "plan": plan,
+        "renews_at": renews_at,
+        "costs": CREDIT_COSTS,
+        "topups": [
+            {"id": k, "price_inr": v["amount_inr"], "credits": v["credits"]}
+            for k, v in TOPUP_PACKS.items()
+        ],
+    }
+
+
 # ── Saved Resumes ─────────────────────────────────────────────────────────────
 
 @router.post("/resumes")

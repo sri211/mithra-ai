@@ -41,6 +41,10 @@ async def search(
     db: AsyncSession = Depends(get_db),
     current_user=Depends(get_optional_user),
 ):
+    if current_user:
+        from services.credits import charge
+        await charge(current_user, db, "job_search")
+
     has_resume = bool(req.resume_profile and req.resume_profile.get("personal"))
 
     # Resolve the effective query: explicit text, else derived from resume

@@ -1,9 +1,11 @@
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from typing import Optional
 from agents.mithra_orchestrator import stream_response, route_intent
 import json
+
+from services.credits import charge_action
 
 router = APIRouter()
 
@@ -30,7 +32,7 @@ class ChatRequest(BaseModel):
     resume_loaded: bool = False
 
 
-@router.post("/stream")
+@router.post("/stream", dependencies=[Depends(charge_action("chat_message"))])
 async def chat_stream(req: ChatRequest):
     history = [{"role": m.role, "content": m.content} for m in req.history]
     profile = req.user_profile.model_dump() if req.user_profile else None

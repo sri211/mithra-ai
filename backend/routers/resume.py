@@ -1,4 +1,5 @@
-from fastapi import APIRouter, HTTPException, UploadFile, File
+from fastapi import APIRouter, HTTPException, UploadFile, File, Depends
+from services.credits import charge_action
 from fastapi.responses import StreamingResponse, Response as FileResponse
 from pydantic import BaseModel
 from agents.resume_builder_agent import build_from_qa, build_from_linkedin, enhance_bullet, stream_build, edit_resume_with_instruction
@@ -89,7 +90,7 @@ class ParseFileRequest(BaseModel):
     file_name: str = ""
 
 
-@router.post("/build/linkedin")
+@router.post("/build/linkedin", dependencies=[Depends(charge_action("resume_build"))])
 async def build_from_linkedin_route(req: LinkedInRequest):
     try:
         # Enrich URL with scraped public data + name extraction before sending to Claude
@@ -100,7 +101,7 @@ async def build_from_linkedin_route(req: LinkedInRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.post("/build/qa")
+@router.post("/build/qa", dependencies=[Depends(charge_action("resume_build"))])
 async def build_from_qa_route(req: QABuildRequest):
     try:
         resume = await build_from_qa(req.conversation)
@@ -109,7 +110,7 @@ async def build_from_qa_route(req: QABuildRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.post("/enhance-bullet")
+@router.post("/enhance-bullet", dependencies=[Depends(charge_action("chat_message"))])
 async def enhance_bullet_route(req: BulletRequest):
     try:
         enhanced = await enhance_bullet(req.bullet, req.role, req.company)
@@ -118,7 +119,7 @@ async def enhance_bullet_route(req: BulletRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.post("/adapt")
+@router.post("/adapt", dependencies=[Depends(charge_action("resume_adapt"))])
 async def adapt_resume_route(req: AdaptRequest):
     try:
         jd_parsed = await parse_job_description(req.jd_text)
@@ -128,7 +129,7 @@ async def adapt_resume_route(req: AdaptRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.post("/cover-letter")
+@router.post("/cover-letter", dependencies=[Depends(charge_action("cover_letter"))])
 async def cover_letter_route(req: CoverLetterRequest):
     try:
         letter = await generate_cover_letter(req.resume, req.jd_text, req.tone)
@@ -192,7 +193,7 @@ def _parse_json_resilient(raw: str, label: str = "") -> dict:
             raise
 
 
-@router.post("/parse-file")
+@router.post("/parse-file", dependencies=[Depends(charge_action("resume_build"))])
 async def parse_file_route(req: ParseFileRequest):
     """Parse resume text — used when text is pre-extracted client-side."""
     from services.claude_service import complete_claude_json
@@ -212,7 +213,7 @@ Extract every field exactly as written. Do not change job titles, industries, or
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.post("/upload")
+@router.post("/upload", dependencies=[Depends(charge_action("resume_build"))])
 async def upload_resume_file(file: UploadFile = File(...)):
     """
     Upload a PDF, DOCX, or TXT file as binary — properly extracts text using
@@ -298,7 +299,7 @@ class ResumeEditRequest(BaseModel):
     current_resume: dict
 
 
-@router.post("/edit")
+@router.post("/edit", dependencies=[Depends(charge_action("chat_message"))])
 async def edit_resume_route(req: ResumeEditRequest):
     try:
         updated = await edit_resume_with_instruction(req.instruction, req.current_resume)
@@ -550,7 +551,7 @@ class ExportPDFRequest(BaseModel):
     name: str = "resume"
 
 
-@router.post("/export-pdf")
+@router.post("/export-pdf", dependencies=[Depends(charge_action("pdf_download"))])
 async def export_pdf_endpoint(req: ExportPDFRequest):
     """Render resume HTML to PDF using Playwright headless Chromium."""
     try:

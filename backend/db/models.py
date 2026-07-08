@@ -22,6 +22,9 @@ class User(Base):
     linkedin_id = Column(String, nullable=True)
     plan = Column(SAEnum(PlanEnum), default=PlanEnum.free, nullable=False)
     referral_code_used = Column(String, nullable=True, index=True)
+    # Credit system — balance refreshed monthly per plan allowance (no rollover)
+    credits_balance = Column(Integer, nullable=True)           # None = not yet initialized
+    credits_period_start = Column(DateTime, nullable=True)
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
     updated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
 
@@ -141,6 +144,18 @@ class PortalCredential(Base):
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
 
     user = relationship("User", back_populates="portal_credentials")
+
+
+class CreditLedger(Base):
+    """Audit trail of every credit grant and spend."""
+    __tablename__ = "credit_ledger"
+
+    id = Column(String, primary_key=True)
+    user_id = Column(String, ForeignKey("users.id"), nullable=False, index=True)
+    delta = Column(Integer, nullable=False)          # +grant / -spend
+    reason = Column(String, nullable=False)          # resume_adapt | monthly_reset | topup_99 | ...
+    balance_after = Column(Integer, nullable=False)
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), index=True)
 
 
 class AICache(Base):

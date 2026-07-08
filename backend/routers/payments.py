@@ -21,31 +21,39 @@ PLANS = {
         "name": "Pro",
         "price_inr": 19800,  # paise (₹198)
         "price_display": "₹198/month",
+        "credits": 300,
         "features": [
-            "Unlimited resume adaptations",
+            "300 credits every month",
+            "~12 resume adaptations or mix freely",
             "All templates + PDF export",
             "Full network (10 contacts)",
-            "Interview prep module",
-            "Job tracker",
+            "Interview prep + job tracker",
         ],
     },
     "elite": {
         "name": "Elite",
         "price_inr": 49800,  # paise (₹498)
         "price_display": "₹498/month",
+        "credits": 1000,
         "features": [
+            "1,000 credits every month",
             "Everything in Pro",
             "Auto-apply access",
-            "Priority AI (Claude Opus)",
-            "1-on-1 Mithra career coaching",
+            "Priority support",
             "LinkedIn profile review",
         ],
     },
 }
 
+# One-time credit top-up packs — usable on any plan, no expiry within the month
+TOPUPS = {
+    "topup_99":  {"name": "120 Credits",  "price_inr": 9900,  "credits": 120},
+    "topup_199": {"name": "280 Credits", "price_inr": 19900, "credits": 280},
+}
+
 
 class CreateOrderRequest(BaseModel):
-    plan: str  # "pro" or "elite"
+    plan: str  # "pro" | "elite" | "topup_99" | "topup_199"
 
 
 class VerifyPaymentRequest(BaseModel):
@@ -61,14 +69,16 @@ async def get_plans():
         "free": {
             "name": "Free",
             "price_display": "₹0/month",
+            "credits": 30,
             "features": [
-                "5 resume adaptations/month",
-                "10 job searches/day",
+                "30 credits every month",
+                "Resume score always free",
                 "3 templates",
                 "Basic network (5 contacts)",
             ],
         },
         **PLANS,
+        "topups": TOPUPS,
     }
 
 
@@ -77,7 +87,7 @@ async def create_order(
     req: CreateOrderRequest,
     current_user: User = Depends(get_current_user),
 ):
-    if req.plan not in PLANS:
+    if req.plan not in PLANS and req.plan not in TOPUPS:
         raise HTTPException(status_code=400, detail="Invalid plan")
 
     if not RAZORPAY_KEY_ID or not RAZORPAY_KEY_SECRET:
@@ -86,7 +96,7 @@ async def create_order(
     try:
         import razorpay
         client = razorpay.Client(auth=(RAZORPAY_KEY_ID, RAZORPAY_KEY_SECRET))
-        plan_data = PLANS[req.plan]
+        plan_data = PLANS.get(req.plan) or TOPUPS[req.plan]
         order = client.order.create({
             "amount": plan_data["price_inr"],
             "currency": "INR",
@@ -129,15 +139,29 @@ async def verify_payment(
     if not hmac.compare_digest(expected_signature, req.razorpay_signature):
         raise HTTPException(status_code=400, detail="Invalid payment signature")
 
-    if req.plan not in PLANS:
+    if req.plan not in PLANS and req.plan not in TOPUPS:
         raise HTTPException(status_code=400, detail="Invalid plan")
 
-    # Upgrade user plan
     result = await db.execute(select(User).where(User.id == current_user.id))
     user = result.scalar_one_or_none()
-    if user:
-        user.plan = PlanEnum(req.plan)
-        await db.commit()
-        logger.info(f"User {user.email} upgraded to {req.plan}")
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
 
-    return {"success": True, "plan": req.plan}
+    from services.credits import grant, PLAN_ALLOWANCE
+
+    if req.plan in TOPUPS:
+        # Credit top-up pack — add credits, plan unchanged
+        pack = TOPUPS[req.plan]
+        balance = await grant(user, db, pack["credits"], req.plan)
+        logger.info(f"User {user.email} bought {req.plan}: +{pack['credits']} credits (balance {balance})")
+        return {"success": True, "plan": req.plan, "credits_added": pack["credits"], "balance": balance}
+
+    # Plan upgrade — set plan and immediately grant this month's allowance
+    user.plan = PlanEnum(req.plan)
+    allowance = PLAN_ALLOWANCE.get(req.plan, 30)
+    user.credits_balance = allowance
+    from datetime import datetime, timezone
+    user.credits_period_start = datetime.now(timezone.utc)
+    await db.commit()
+    logger.info(f"User {user.email} upgraded to {req.plan} with {allowance} credits")
+    return {"success": True, "plan": req.plan, "credits_added": allowance}
