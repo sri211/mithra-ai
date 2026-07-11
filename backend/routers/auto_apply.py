@@ -3,6 +3,8 @@ import base64
 import asyncio
 import json
 import os
+import html as _html
+import tempfile
 from fastapi import APIRouter, HTTPException, Depends
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
@@ -59,6 +61,7 @@ class AutoSubmitRequest(BaseModel):
     job_url: str; job_id: str; company: str; role: str
     match_score: int = 0
     profile: dict   # name, email, phone, location, linkedin
+    resume: dict = {}  # full resume JSON — used to generate the PDF attachment + cover text
 
 class SessionInputRequest(BaseModel):
     value: str
@@ -91,75 +94,129 @@ async def _screenshot(page) -> str:
     except Exception:
         return ""
 
-async def _detect_blocker(page) -> str:
+async def _captcha_is_blocking(page) -> bool:
+    """True only for a VISIBLE captcha challenge the user must solve.
+    Nearly every site embeds an invisible reCAPTCHA for form protection — that is
+    NOT a blocker and must be ignored (this false-positive killed real applications)."""
+    # Visible reCAPTCHA checkbox / challenge, or hCaptcha, sized and on-screen
+    candidates = [
+        "iframe[title*='recaptcha' i]",
+        "iframe[src*='recaptcha/api2/anchor']",
+        "iframe[src*='hcaptcha']",
+        "div.g-recaptcha:visible", "div.h-captcha:visible",
+        "iframe[src*='recaptcha/api2/bframe']",  # the image-grid challenge popup
+    ]
+    for sel in candidates:
+        try:
+            el = page.locator(sel).first
+            if await el.is_visible(timeout=250):
+                box = await el.bounding_box()
+                if box and box["width"] > 60 and box["height"] > 40:
+                    return True
+        except Exception:
+            continue
+    return False
+
+
+async def _login_wall_present(page) -> bool:
+    """URL-level or full-page login (not a dismissible modal)."""
     url = page.url.lower()
     try: title = (await page.title()).lower()
     except: title = ""
     login_hints = ["/login","/signin","/sign-in","/auth/","accounts.google.com",
                    "login.microsoftonline","checkpoint/challenge","uas/login",
-                   "nlogin","session/new","authwall"]
-    title_hints = ["sign in","log in","login","join now","sign up to"]
-    if any(h in url for h in login_hints) or any(h in title for h in title_hints):
-        return "login"
-    # Login MODAL OVERLAYS — portals show these on job pages without changing the URL
-    # (LinkedIn contextual sign-in modal was the main miss)
-    overlay_selectors = [
-        ".sign-in-modal", ".contextual-sign-in-modal", "[data-test-modal] .sign-in-form",
-        "div.authwall", "#organic-div form.login-form",
-        "button.sign-in-modal__outlet-btn",
-    ]
-    for sel in overlay_selectors:
+                   "nlogin","session/new","authwall","/register","/signup"]
+    if any(h in url for h in login_hints):
+        return True
+    title_hints = ["sign in","log in","login","join now","sign up to","register"]
+    if any(h in title for h in title_hints):
+        # Confirm there's actually a password field (title alone is unreliable)
         try:
-            if await page.locator(sel).first.is_visible(timeout=300):
-                return "login"
+            if await page.locator("input[type='password']:visible").first.is_visible(timeout=400):
+                return True
         except Exception:
             pass
-    try:
-        # Text-based overlay detection: a visible "Sign in" dialog over the page
-        dialog = page.locator("div[role='dialog'], section[role='dialog']").first
-        if await dialog.is_visible(timeout=300):
-            txt = (await dialog.inner_text(timeout=500)).lower()
-            if "sign in" in txt or "join now" in txt or "continue with google" in txt:
-                return "login"
-    except Exception:
-        pass
-    try:
-        if await page.locator("iframe[src*='recaptcha'],iframe[src*='captcha']").count():
-            return "captcha"
-    except: pass
+    return False
+
+
+async def _detect_blocker(page) -> str:
+    """Returns '' | 'login' | 'captcha'. Called AFTER _dismiss_overlays, so any
+    modal that could be closed is already gone by the time this runs."""
+    if await _login_wall_present(page):
+        return "login"
+    # A login/signup MODAL still visible after dismissal attempts = real wall
+    for sel in [".sign-in-modal", ".contextual-sign-in-modal", "div.authwall",
+                "#organic-div form.login-form"]:
+        try:
+            if await page.locator(sel).first.is_visible(timeout=250):
+                # Only a wall if it contains auth inputs
+                if await page.locator("input[type='password']:visible, input[type='email']:visible").first.is_visible(timeout=300):
+                    return "login"
+        except Exception:
+            pass
+    if await _captcha_is_blocking(page):
+        return "captcha"
     return ""
 
 
 async def _dismiss_overlays(page):
-    """Close cookie banners, consent dialogs and dismissible modals — including
-    TCF consent prompts living inside iframes."""
-    selectors = [
-        "button:has-text('Accept')", "button:has-text('Accept all')",
-        "button:has-text('AGREE')", "button:has-text('Agree')",
-        "button:has-text('Consent')", "button[mode='primary']",
-        "button[aria-label='Dismiss']", "button.modal__dismiss",
-        "icon[type='cancel-icon']", "button:has-text('✕')",
-    ]
-    for sel in selectors:
+    """Close cookie/consent banners AND dismissible signup/login modals.
+
+    Many job boards (Jobaaj, Instahyre, etc.) pop a 'Sign up' modal over the job
+    that has a close (×) button — closing it reveals the real Apply button. We
+    always TRY to close first; only an undismissable auth wall counts as a blocker.
+    """
+    # 1. Consent / cookie accept (main frame)
+    for sel in [
+        "button:has-text('Accept all')", "button:has-text('Accept All')",
+        "button:has-text('Accept')", "button:has-text('AGREE')",
+        "button:has-text('Agree')", "button:has-text('I agree')",
+        "button:has-text('Got it')", "button:has-text('Allow all')",
+        "button[mode='primary']", "#onetrust-accept-btn-handler",
+    ]:
         try:
             el = page.locator(sel).first
-            if await el.is_visible(timeout=250):
-                await el.click(timeout=800)
-                await page.wait_for_timeout(400)
+            if await el.is_visible(timeout=200):
+                await el.click(timeout=800); await page.wait_for_timeout(350); break
         except Exception:
             continue
-    # Consent prompts inside iframes (TCF / CMP frameworks)
+
+    # 2. Consent inside CMP iframes (TCF frameworks)
     try:
         for frame in page.frames[1:6]:
             for sel in ["button:has-text('Accept')", "button:has-text('AGREE')", "button:has-text('Consent')"]:
                 try:
                     el = frame.locator(sel).first
-                    if await el.is_visible(timeout=200):
-                        await el.click(timeout=800)
-                        await page.wait_for_timeout(400)
-                        return
+                    if await el.is_visible(timeout=150):
+                        await el.click(timeout=800); await page.wait_for_timeout(350); break
                 except Exception:
                     continue
+    except Exception:
+        pass
+
+    # 3. Close dismissible signup/login modals (the × / close button)
+    for sel in [
+        "div[role='dialog'] button[aria-label*='close' i]",
+        "div[role='dialog'] button[aria-label*='dismiss' i]",
+        "[class*='modal'] button[aria-label*='close' i]",
+        "button.modal__dismiss", "button.close", "button.modal-close",
+        ".modal button:has-text('✕')", ".modal button:has-text('×')",
+        "[class*='popup'] [class*='close']", "svg[aria-label*='close' i]",
+        "button:has-text('Maybe later')", "button:has-text('Skip')",
+        "button:has-text('Continue without')", "button:has-text('Not now')",
+    ]:
+        try:
+            el = page.locator(sel).first
+            if await el.is_visible(timeout=200):
+                await el.click(timeout=800); await page.wait_for_timeout(400)
+        except Exception:
+            continue
+
+    # 4. Escape key as a last-resort modal closer
+    try:
+        if await page.locator("div[role='dialog']:visible, [class*='modal']:visible").first.is_visible(timeout=200):
+            await page.keyboard.press("Escape")
+            await page.wait_for_timeout(300)
     except Exception:
         pass
 
@@ -245,6 +302,15 @@ async def _fill_form(page, profile: dict) -> int:
         (['input[name="linkedin"]','input[id*="linkedin" i]',
           'input[placeholder*="linkedin" i]'], li),
     ]
+    # First + last name split for portals that separate them
+    parts = name.split()
+    first = parts[0] if parts else ""
+    last = " ".join(parts[1:]) if len(parts) > 1 else ""
+    groups += [
+        (['input[name*="first" i]','input[id*="first" i]','input[placeholder*="first name" i]'], first),
+        (['input[name*="last" i]','input[id*="last" i]','input[placeholder*="last name" i]'], last),
+    ]
+
     filled = 0
     for selectors, value in groups:
         if not value: continue
@@ -252,10 +318,153 @@ async def _fill_form(page, profile: dict) -> int:
             try:
                 el = page.locator(sel).first
                 if await el.is_visible(timeout=400) and await el.is_enabled(timeout=400):
+                    cur = ""
+                    try: cur = (await el.input_value(timeout=300)).strip()
+                    except Exception: pass
+                    if cur:  # already populated — don't overwrite
+                        break
                     # fill() with a hard timeout — .type() could stall for 30s per field
                     await el.fill(value, timeout=2500)
                     filled += 1; break
             except: continue
+    return filled
+
+
+async def _generate_resume_pdf(context, resume: dict, name: str) -> str:
+    """Render the resume JSON to a simple PDF and return the temp file path.
+    Used to attach to portal file-upload fields. Returns '' on failure."""
+    if not resume or not resume.get("personal"):
+        return ""
+    try:
+        p = resume.get("personal", {})
+        def esc(x): return _html.escape(str(x or ""))
+        exp_html = ""
+        for e in resume.get("experience", [])[:6]:
+            bullets = "".join(f"<li>{esc(b)}</li>" for b in (e.get("bullets") or [])[:5])
+            exp_html += (f"<div class='role'><b>{esc(e.get('role'))}</b> — {esc(e.get('company'))}"
+                         f" <span class='dt'>({esc(e.get('start'))}–{'Present' if e.get('current') else esc(e.get('end'))})</span>"
+                         f"<ul>{bullets}</ul></div>")
+        edu_html = "".join(
+            f"<div>{esc(ed.get('degree'))} {esc(ed.get('field'))}, {esc(ed.get('institution'))} "
+            f"<span class='dt'>({esc(ed.get('start'))}–{esc(ed.get('end'))})</span></div>"
+            for ed in resume.get("education", [])[:4])
+        sk = resume.get("skills", {})
+        skills = sk.get("technical", []) + sk.get("soft", []) if isinstance(sk, dict) else (sk if isinstance(sk, list) else [])
+        skills_html = ", ".join(esc(s) for s in skills[:25])
+        doc = f"""<html><head><meta charset='utf-8'><style>
+        body{{font-family:Georgia,serif;color:#111;padding:40px;line-height:1.5;font-size:12px}}
+        h1{{font-size:22px;margin:0}} h2{{font-size:13px;border-bottom:1px solid #999;margin:16px 0 6px;text-transform:uppercase;letter-spacing:1px}}
+        .contact{{color:#555;font-size:11px;margin:4px 0 12px}} .role{{margin-bottom:10px}} .dt{{color:#777;font-weight:normal}}
+        ul{{margin:4px 0 0 18px}} li{{margin:2px 0}}</style></head><body>
+        <h1>{esc(p.get('name') or name)}</h1>
+        <div class='contact'>{esc(p.get('title'))} · {esc(p.get('email'))} · {esc(p.get('phone'))} · {esc(p.get('location'))}</div>
+        {f"<h2>Summary</h2><div>{esc(resume.get('summary'))}</div>" if resume.get('summary') else ""}
+        <h2>Experience</h2>{exp_html}
+        {f"<h2>Education</h2>{edu_html}" if edu_html else ""}
+        {f"<h2>Skills</h2><div>{skills_html}</div>" if skills_html else ""}
+        </body></html>"""
+        pg = await context.new_page()
+        await pg.set_content(doc, wait_until="load")
+        fd, path = tempfile.mkstemp(suffix=".pdf", prefix="mithra_resume_")
+        os.close(fd)
+        await pg.pdf(path=path, format="A4", print_background=True,
+                     margin={"top": "0mm", "right": "0mm", "bottom": "0mm", "left": "0mm"})
+        await pg.close()
+        return path
+    except Exception:
+        return ""
+
+
+async def _upload_resume(page, pdf_path: str) -> bool:
+    """Attach the generated resume PDF to any file input on the page."""
+    if not pdf_path:
+        return False
+    try:
+        inputs = page.locator("input[type='file']")
+        n = await inputs.count()
+        for i in range(min(n, 4)):
+            el = inputs.nth(i)
+            try:
+                # File inputs are often hidden behind a styled button — set anyway
+                await el.set_input_files(pdf_path, timeout=3000)
+                await page.wait_for_timeout(1200)
+                return True
+            except Exception:
+                continue
+    except Exception:
+        pass
+    return False
+
+
+async def _fill_choices(page, profile: dict) -> int:
+    """Handle dropdowns, radios and checkboxes with sensible defaults so the form
+    passes validation. Conservative: only touches clearly-safe controls."""
+    filled = 0
+    yes_words = ["yes", "i agree", "agree", "authorized", "authorised", "available", "willing"]
+
+    # Native <select> — pick the first meaningful non-placeholder option
+    try:
+        selects = page.locator("select:visible")
+        for i in range(min(await selects.count(), 8)):
+            sel = selects.nth(i)
+            try:
+                val = await sel.input_value(timeout=300)
+                if val:  # already chosen
+                    continue
+                options = sel.locator("option")
+                oc = await options.count()
+                for j in range(oc):
+                    otext = (await options.nth(j).inner_text(timeout=200)).strip().lower()
+                    oval = await options.nth(j).get_attribute("value")
+                    if not oval or otext in ("", "select", "-- select --", "choose", "please select"):
+                        continue
+                    await sel.select_option(index=j, timeout=1500)
+                    filled += 1
+                    break
+            except Exception:
+                continue
+    except Exception:
+        pass
+
+    # Consent / agreement checkboxes — tick required ones
+    try:
+        boxes = page.locator("input[type='checkbox']:visible")
+        for i in range(min(await boxes.count(), 6)):
+            box = boxes.nth(i)
+            try:
+                required = await box.get_attribute("required")
+                if required is not None and not await box.is_checked():
+                    await box.check(timeout=1200)
+                    filled += 1
+            except Exception:
+                continue
+    except Exception:
+        pass
+
+    # Yes/No radio groups — choose the affirmative option
+    try:
+        radios = page.locator("input[type='radio']:visible")
+        rc = await radios.count()
+        seen_names = set()
+        for i in range(min(rc, 12)):
+            r = radios.nth(i)
+            try:
+                nm = await r.get_attribute("name")
+                if nm in seen_names:
+                    continue
+                label = ((await r.get_attribute("value")) or "").lower()
+                # aria-label or adjacent label text
+                aria = ((await r.get_attribute("aria-label")) or "").lower()
+                if any(w in label or w in aria for w in yes_words):
+                    if not await r.is_checked():
+                        await r.check(timeout=1000)
+                        filled += 1
+                        if nm: seen_names.add(nm)
+            except Exception:
+                continue
+    except Exception:
+        pass
+
     return filled
 
 async def _try_portal_login(page, portal: str, username: str, password: str) -> str:
@@ -368,6 +577,7 @@ async def _run_submit_session(session_id: str, req: AutoSubmitRequest, user: Use
     pw_ctx = async_playwright()
     pw     = await pw_ctx.__aenter__()
     browser = None
+    resume_pdf = ""
 
     try:
         browser = await pw.chromium.launch(
@@ -388,6 +598,12 @@ async def _run_submit_session(session_id: str, req: AutoSubmitRequest, user: Use
         )
         page = await context.new_page()
         portal = detect_portal(req.job_url)
+
+        # Pre-generate the resume PDF once, for any file-upload field we meet
+        try:
+            resume_pdf = await _generate_resume_pdf(context, req.resume, req.profile.get("name", ""))
+        except Exception:
+            resume_pdf = ""
 
         # ── Check for saved credentials (fresh DB session — background task) ──
         async with AsyncSessionLocal() as cred_db:
@@ -452,6 +668,7 @@ async def _run_submit_session(session_id: str, req: AutoSubmitRequest, user: Use
         login_attempts = 0
         missing_asked = 0
         confirm_shown = False
+        resume_uploaded = False
 
         from loguru import logger as _log
         for step in range(1, 9):
@@ -514,6 +731,14 @@ async def _run_submit_session(session_id: str, req: AutoSubmitRequest, user: Use
             # ── Fill + verify ────────────────────────────────────────────────
             await emit({"type":"status","message":f"Step {step}: filling your details…"})
             filled_total += await _fill_form(page, req.profile)
+            # Attach resume to any file-upload field
+            if resume_pdf and not resume_uploaded:
+                if await _upload_resume(page, resume_pdf):
+                    resume_uploaded = True
+                    filled_total += 1
+                    await emit({"type":"status","message":"Attached your resume ✓"})
+            # Dropdowns, consent checkboxes, yes/no radios
+            filled_total += await _fill_choices(page, req.profile)
             empties = await _count_empty_required(page)
 
             if empties and missing_asked < 2:
@@ -622,6 +847,10 @@ async def _run_submit_session(session_id: str, req: AutoSubmitRequest, user: Use
         except: pass
         try: await pw_ctx.__aexit__(None, None, None)
         except: pass
+        try:
+            if resume_pdf and os.path.exists(resume_pdf):
+                os.remove(resume_pdf)
+        except Exception: pass
 
 
 async def _run_with_watchdog(session_id: str, req: AutoSubmitRequest, user: User):
