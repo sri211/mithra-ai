@@ -731,7 +731,13 @@ async def _run_submit_session(session_id: str, req: AutoSubmitRequest, user: Use
             headless=True,
             args=["--no-sandbox","--disable-setuid-sandbox",
                   "--disable-dev-shm-usage","--disable-gpu",
-                  "--disable-blink-features=AutomationControlled"],
+                  "--disable-blink-features=AutomationControlled",
+                  # Memory-slimming — Chrome was being OOM-killed on this 3.7GB box
+                  "--js-flags=--max-old-space-size=384",
+                  "--disable-extensions","--disable-background-networking",
+                  "--disable-background-timer-throttling","--disable-renderer-backgrounding",
+                  "--memory-pressure-off","--disable-features=site-per-process,TranslateUI",
+                  "--blink-settings=imagesEnabled=false"],
         )
         context = await browser.new_context(
             viewport={"width":1280,"height":800},
@@ -743,7 +749,40 @@ async def _run_submit_session(session_id: str, req: AutoSubmitRequest, user: Use
             "Object.defineProperty(navigator,'webdriver',{get:()=>undefined});"
             "window.chrome={runtime:{}};"
         )
+
+        # BLOCK consent/CMP and tracker scripts at the network level so the
+        # "This site asks for consent to use your data" popup never renders —
+        # a cross-origin CMP iframe was hanging the whole session uncancellably.
+        _BLOCK_HOSTS = (
+            "fundingchoicesmessages.google.com", "funding-choices",
+            "cookiebot.com", "cookie-cdn", "onetrust.com", "cookielaw.org",
+            "quantcast", "consensu.org", "cmp.", "usercentrics",
+            "consent.", "privacy-mgmt", "sourcepoint", "trustarc",
+            "doubleclick.net", "googletagmanager.com",
+        )
+        async def _route(route):
+            try:
+                req_ = route.request
+                url_l = req_.url.lower()
+                # Block consent/CMP/trackers AND heavy media (images/video/fonts)
+                # to cut Chrome's memory footprint — we only need the form's text/inputs.
+                if any(h in url_l for h in _BLOCK_HOSTS) or req_.resource_type in ("image", "media", "font"):
+                    await route.abort()
+                else:
+                    await route.continue_()
+            except Exception:
+                try: await route.continue_()
+                except Exception: pass
+        try:
+            await context.route("**/*", _route)
+        except Exception:
+            pass
+
         page = await context.new_page()
+        # Cap ALL Playwright operations so nothing can wait the default 30s —
+        # combined with _safe() this makes an uncancellable hang impossible.
+        page.set_default_timeout(8000)
+        page.set_default_navigation_timeout(25000)
         portal = detect_portal(req.job_url)
 
         # Pre-generate the resume PDF once, for any file-upload field we meet
@@ -819,6 +858,15 @@ async def _run_submit_session(session_id: str, req: AutoSubmitRequest, user: Use
 
         from loguru import logger as _log
         for step in range(1, 9):
+            # Instant liveness check — if Chrome was OOM-killed, is_connected() is
+            # False immediately (no CDP call), so we abort cleanly instead of
+            # hanging on every subsequent Playwright call until the watchdog.
+            if not browser.is_connected():
+                _log.warning(f"[auto-apply {session_id[:8]}] browser died (likely OOM) at step {step}")
+                await emit({"type":"done","success":False,"fields_filled":filled_total,
+                            "message":"The apply session ran out of resources — please retry (server just got more memory headroom).",
+                            "apply_url":req.job_url,"portal":portal.title()})
+                return
             await _safe(_dismiss_overlays(page), 25, None)
             state = await _safe(_detect_blocker(page), 15, "")
             _log.info(f"[auto-apply {session_id[:8]}] step {step}: state={state or 'ok'} applied_clicked={applied_clicked} filled={filled_total}")
