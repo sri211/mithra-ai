@@ -25,13 +25,13 @@ PLAN_ALLOWANCE = {"free": 30, "pro": 300, "elite": 1000}
 
 CREDIT_COSTS = {
     "resume_adapt": 25,       # Sonnet adaptation + cached JD parse + company intel
-    "resume_build": 10,       # AI extract / full rebuild (Haiku)
+    "resume_build": 15,       # AI extract / full rebuild (Haiku)
     "interview_session": 10,  # 7-question set (usually cache-hit = pure margin)
     "interview_feedback": 3,  # per answer scored
     "cover_letter": 5,
-    "auto_apply": 5,          # Playwright session (compute)
+    "auto_apply": 8,          # Playwright session (compute + assistant loop)
     "pdf_download": 2,
-    "job_search": 1,          # usually cache-hit = pure margin
+    "job_search": 2,          # usually cache-hit = pure margin
     "chat_message": 1,
     "resume_score": 0,        # rule-based — always free
 }

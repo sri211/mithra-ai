@@ -105,12 +105,13 @@ async def login(req: LoginRequest, db: AsyncSession = Depends(get_db)):
     result = await db.execute(select(User).where(User.email == req.email))
     user = result.scalar_one_or_none()
     if not user:
-        raise HTTPException(status_code=401, detail="Invalid email or password")
+        raise HTTPException(status_code=401,
+            detail="No account found with this email. If you had one before, please register again — we recently migrated our database.")
     if not user.hashed_password:
         # Account was created via Google — guide user to the right flow
         raise HTTPException(status_code=401, detail="This account was created with Google. Please use 'Sign in with Google' instead.")
     if not verify_password(req.password, user.hashed_password):
-        raise HTTPException(status_code=401, detail="Invalid email or password")
+        raise HTTPException(status_code=401, detail="Incorrect password. Use 'Forgot password?' to reset it.")
 
     access = create_jwt(user.id, user.email, user.plan.value)
     refresh = create_refresh_token(user.id)

@@ -97,15 +97,74 @@ async def _detect_blocker(page) -> str:
     except: title = ""
     login_hints = ["/login","/signin","/sign-in","/auth/","accounts.google.com",
                    "login.microsoftonline","checkpoint/challenge","uas/login",
-                   "nlogin","session/new"]
+                   "nlogin","session/new","authwall"]
     title_hints = ["sign in","log in","login","join now","sign up to"]
     if any(h in url for h in login_hints) or any(h in title for h in title_hints):
         return "login"
+    # Login MODAL OVERLAYS — portals show these on job pages without changing the URL
+    # (LinkedIn contextual sign-in modal was the main miss)
+    overlay_selectors = [
+        ".sign-in-modal", ".contextual-sign-in-modal", "[data-test-modal] .sign-in-form",
+        "div.authwall", "#organic-div form.login-form",
+        "button.sign-in-modal__outlet-btn",
+    ]
+    for sel in overlay_selectors:
+        try:
+            if await page.locator(sel).first.is_visible(timeout=300):
+                return "login"
+        except Exception:
+            pass
+    try:
+        # Text-based overlay detection: a visible "Sign in" dialog over the page
+        dialog = page.locator("div[role='dialog'], section[role='dialog']").first
+        if await dialog.is_visible(timeout=300):
+            txt = (await dialog.inner_text(timeout=500)).lower()
+            if "sign in" in txt or "join now" in txt or "continue with google" in txt:
+                return "login"
+    except Exception:
+        pass
     try:
         if await page.locator("iframe[src*='recaptcha'],iframe[src*='captcha']").count():
             return "captcha"
     except: pass
     return ""
+
+
+async def _dismiss_overlays(page):
+    """Close cookie banners and dismissible modals that block interaction."""
+    for sel in [
+        "button:has-text('Accept')", "button:has-text('Accept all')",
+        "button[aria-label='Dismiss']", "button.modal__dismiss",
+        "icon[type='cancel-icon']", "button:has-text('✕')",
+    ]:
+        try:
+            el = page.locator(sel).first
+            if await el.is_visible(timeout=250):
+                await el.click(timeout=800)
+                await page.wait_for_timeout(400)
+        except Exception:
+            continue
+
+
+async def _count_empty_required(page) -> list[str]:
+    """Names/placeholders of visible required inputs still empty after fill."""
+    empties: list[str] = []
+    try:
+        inputs = page.locator("input[required]:visible, textarea[required]:visible")
+        n = min(await inputs.count(), 12)
+        for i in range(n):
+            el = inputs.nth(i)
+            try:
+                if not (await el.input_value(timeout=300)).strip():
+                    label = (await el.get_attribute("placeholder") or
+                             await el.get_attribute("name") or
+                             await el.get_attribute("aria-label") or "field")
+                    empties.append(label[:40])
+            except Exception:
+                continue
+    except Exception:
+        pass
+    return empties
 
 async def _try_click_submit(page) -> bool:
     """Click the final submit button after form fill (assisted-apply confirm step)."""
@@ -327,159 +386,202 @@ async def _run_submit_session(session_id: str, req: AutoSubmitRequest, user: Use
         ss = await _screenshot(page)
         await emit({"type":"screenshot","data":ss})
 
-        blocker = await _detect_blocker(page)
+        # ═══ AGENT LOOP: plan → act → verify, until applied or genuinely blocked ═══
+        # (login walls — including modal overlays — are handled inside the loop)
+        async def record_in_tracker():
+            try:
+                async with AsyncSessionLocal() as track_db:
+                    dup = await track_db.execute(select(JobApplication).where(
+                        JobApplication.user_id == user.id,
+                        JobApplication.job_id == req.job_id))
+                    if not dup.scalar_one_or_none():
+                        track_db.add(JobApplication(
+                            id=str(uuid.uuid4()), user_id=user.id, job_id=req.job_id,
+                            company=req.company, role=req.role, job_url=req.job_url,
+                            platform=portal, match_score=req.match_score,
+                            status="applied", notes="Auto-submitted via Mithra AI"))
+                        await track_db.commit()
+            except Exception:
+                pass
 
-        # ── Handle login wall ─────────────────────────────────────────────────
-        if blocker == "login":
-            if cred:
-                # Auto-login with stored credentials
-                await emit({"type":"status","message":f"Logging in to {portal.title()}…"})
-                pw_dec = decrypt_pw(cred.password_enc)
-                login_result = await _try_portal_login(page, portal, cred.username, pw_dec)
+        async def login_with_otp() -> str:
+            """Login; if OTP needed, ask the user and continue. Returns final state."""
+            pw_dec = decrypt_pw(cred.password_enc)
+            result = await _try_portal_login(page, portal, cred.username, pw_dec)
+            if result == "otp":
+                ss2 = await _screenshot(page)
+                await emit({"type":"input_needed","field":"otp",
+                            "message":f"{portal.title()} sent an OTP to your email/phone — enter it to continue:",
+                            "screenshot":ss2})
+                otp = await wait_input(240)
+                if not otp:
+                    return "otp_timeout"
+                await _fill_otp(page, otp)
+                await page.wait_for_timeout(3500)
+                # Verify OTP actually worked
+                if await _detect_blocker(page) == "login":
+                    return "failed"
+                return "success"
+            return result
 
-                if login_result == "success":
-                    await emit({"type":"status","message":"Logged in ✓ — navigating to job…"})
-                    try: await page.goto(req.job_url, wait_until="domcontentloaded", timeout=20000)
-                    except: pass
-                    await page.wait_for_timeout(2000)
-                    ss = await _screenshot(page)
-                    await emit({"type":"screenshot","data":ss})
+        applied_clicked = False
+        filled_total = 0
+        login_attempts = 0
+        missing_asked = 0
+        confirm_shown = False
 
-                elif login_result == "otp":
-                    ss = await _screenshot(page)
-                    await emit({
-                        "type":"input_needed","field":"otp",
-                        "message":f"OTP sent to your {portal.title()} email/phone — enter it below:",
-                        "screenshot":ss,
-                    })
-                    otp = await wait_input(180)
-                    if otp:
-                        await _fill_otp(page, otp)
-                        await page.wait_for_timeout(3000)
-                        await emit({"type":"status","message":"OTP submitted — navigating to job…"})
-                        try: await page.goto(req.job_url, wait_until="domcontentloaded", timeout=20000)
-                        except: pass
-                        await page.wait_for_timeout(2000)
-                    else:
-                        ss = await _screenshot(page)
-                        await emit({"type":"done","success":False,"screenshot":ss,
-                                    "message":"OTP timed out. Apply manually using the link below.",
-                                    "apply_url":req.job_url})
-                        return
+        for step in range(1, 9):
+            await _dismiss_overlays(page)
+            state = await _detect_blocker(page)
+            ss = await _screenshot(page)
+            await emit({"type":"screenshot","data":ss})
 
-                elif login_result == "captcha":
-                    ss = await _screenshot(page)
-                    await emit({"type":"done","success":False,"screenshot":ss,
-                                "message":f"{portal.title()} blocked login with a CAPTCHA. "
-                                          "Try the 'Open Application' button to apply manually.",
-                                "apply_url":req.job_url})
-                    return
-
-                else:  # failed
-                    ss = await _screenshot(page)
+            # ── Login wall (incl. modal overlays) ────────────────────────────
+            if state == "login":
+                if not cred:
                     await emit({"type":"done","success":False,"screenshot":ss,
                                 "needs_credentials":portal,
-                                "message":f"Saved {portal.title()} credentials didn't work — "
-                                          "update them and retry.",
+                                "message":f"{portal.title()} requires login. Add your credentials, then retry.",
                                 "apply_url":req.job_url})
                     return
+                if login_attempts >= 2:
+                    await emit({"type":"done","success":False,"screenshot":ss,
+                                "needs_credentials":portal,
+                                "message":f"Login to {portal.title()} keeps failing — check your credentials.",
+                                "apply_url":req.job_url})
+                    return
+                login_attempts += 1
+                await emit({"type":"status","message":f"Step {step}: logging in to {portal.title()}…"})
+                lr = await login_with_otp()
+                if lr == "success":
+                    await emit({"type":"status","message":"Logged in ✓ — returning to the job…"})
+                    try: await page.goto(req.job_url, wait_until="domcontentloaded", timeout=22000)
+                    except Exception: pass
+                    await page.wait_for_timeout(2000)
+                    continue
+                if lr == "otp_timeout":
+                    await emit({"type":"done","success":False,"screenshot":ss,
+                                "message":"OTP timed out. Retry auto-apply when you have the code handy.",
+                                "apply_url":req.job_url})
+                    return
+                if lr == "captcha":
+                    await emit({"type":"done","success":False,"screenshot":ss,
+                                "message":f"{portal.title()} demanded a CAPTCHA at login — apply manually via 'Open Application'.",
+                                "apply_url":req.job_url})
+                    return
+                continue  # failed → loop retries once more
 
-            else:
-                # No credentials — end session with a needs_credentials done event
-                # (a separate prompt event would be instantly replaced by done in the UI)
-                ss = await _screenshot(page)
+            if state == "captcha":
                 await emit({"type":"done","success":False,"screenshot":ss,
-                            "needs_credentials":portal,
-                            "message":f"This job is on {portal.title()} which requires login. "
-                                      f"Add your {portal.title()} credentials, then retry auto-apply.",
+                            "message":"CAPTCHA on this page — finish manually via 'Open Application'.",
                             "apply_url":req.job_url})
                 return
 
-        elif blocker == "captcha":
-            ss = await _screenshot(page)
-            await emit({"type":"done","success":False,"screenshot":ss,
-                        "message":"CAPTCHA detected. Use 'Open Application' to apply manually.",
-                        "apply_url":req.job_url})
-            return
+            # ── Reach the application form ───────────────────────────────────
+            if not applied_clicked:
+                await emit({"type":"status","message":f"Step {step}: opening the application form…"})
+                clicked = await _try_click_apply(page)
+                applied_clicked = True
+                if clicked:
+                    await page.wait_for_timeout(1500)
+                    continue  # re-detect: apply click often triggers a login wall
 
-        # ── Click Apply button ────────────────────────────────────────────────
-        await emit({"type":"status","message":"Looking for Apply button…"})
-        await _try_click_apply(page)
-        await page.wait_for_timeout(1500)
+            # ── Fill + verify ────────────────────────────────────────────────
+            await emit({"type":"status","message":f"Step {step}: filling your details…"})
+            filled_total += await _fill_form(page, req.profile)
+            empties = await _count_empty_required(page)
 
-        # Second login wall (some portals show login only after clicking Apply)
-        blocker2 = await _detect_blocker(page)
-        if blocker2 == "login" and cred:
-            await emit({"type":"status","message":f"Re-logging in to {portal.title()}…"})
-            pw_dec = decrypt_pw(cred.password_enc)
-            r2 = await _try_portal_login(page, portal, cred.username, pw_dec)
-            if r2 == "success":
-                try: await page.goto(req.job_url, wait_until="domcontentloaded", timeout=20000)
-                except: pass
-                await page.wait_for_timeout(2000)
-                await _try_click_apply(page)
-                await page.wait_for_timeout(1500)
-            elif r2 == "otp":
+            if empties and missing_asked < 2:
+                missing_asked += 1
+                field_name = empties[0]
                 ss = await _screenshot(page)
-                await emit({"type":"input_needed","field":"otp",
-                            "message":"OTP required — enter it below:","screenshot":ss})
-                otp = await wait_input(180)
-                if otp:
-                    await _fill_otp(page, otp)
-                    await page.wait_for_timeout(2500)
+                await emit({"type":"input_needed","field":"missing_info",
+                            "message":f"The form needs '{field_name}' which isn't in your profile — type it below:",
+                            "screenshot":ss})
+                answer = await wait_input(240)
+                if answer:
+                    try:
+                        el = page.locator("input[required]:visible, textarea[required]:visible").first
+                        # fill the first still-empty required field
+                        inputs = page.locator("input[required]:visible, textarea[required]:visible")
+                        for i in range(min(await inputs.count(), 12)):
+                            cand = inputs.nth(i)
+                            if not (await cand.input_value(timeout=300)).strip():
+                                await cand.fill(answer)
+                                filled_total += 1
+                                break
+                    except Exception:
+                        pass
+                    continue  # re-verify
 
-        # ── Fill form ─────────────────────────────────────────────────────────
-        await emit({"type":"status","message":"Filling in your details…"})
-        await page.wait_for_timeout(500)
-        filled = await _fill_form(page, req.profile)
+            # ── Confirm & submit ─────────────────────────────────────────────
+            if not confirm_shown:
+                confirm_shown = True
+                ss = await _screenshot(page)
+                await emit({
+                    "type": "input_needed", "field": "confirm_submit",
+                    "message": (f"Filled {filled_total} field(s)"
+                                + (f" — {len(empties)} field(s) may still need attention" if empties else "")
+                                + ". Review the screenshot and tap Confirm to submit."),
+                    "screenshot": ss,
+                })
+                answer = await wait_input(300)
+                if not (answer and answer.strip().lower() in ("submit", "confirm", "yes", "y", "ok")):
+                    ss = await _screenshot(page)
+                    await emit({"type":"done","success":True,"fields_filled":filled_total,
+                                "screenshot":ss,
+                                "message":f"Auto-filled {filled_total} field(s). Finish and submit via 'Open Application'.",
+                                "apply_url":req.job_url,"portal":portal.title()})
+                    return
 
-        # ── Assisted confirm: show the filled form, wait for one-tap approval ──
-        ss = await _screenshot(page)
-        await emit({
-            "type": "input_needed", "field": "confirm_submit",
-            "message": (f"Filled {filled} field(s). Review the screenshot — "
-                        "tap Confirm to submit, or Cancel to finish manually."),
-            "screenshot": ss,
-        })
-        answer = await wait_input(300)
-
-        if answer and answer.strip().lower() in ("submit", "confirm", "yes", "y", "ok"):
-            await emit({"type": "status", "message": "Submitting application…"})
+            await emit({"type":"status","message":f"Step {step}: submitting…"})
             submitted = await _try_click_submit(page)
-            await page.wait_for_timeout(1500)
-            ss = await _screenshot(page)
+            await page.wait_for_timeout(2000)
 
             if submitted:
-                # Record in tracker automatically (fresh DB session)
+                # Verify submission actually landed (confirmation text or form gone)
+                confirmed = False
                 try:
-                    async with AsyncSessionLocal() as track_db:
-                        dup = await track_db.execute(select(JobApplication).where(
-                            JobApplication.user_id == user.id,
-                            JobApplication.job_id == req.job_id))
-                        if not dup.scalar_one_or_none():
-                            track_db.add(JobApplication(
-                                id=str(uuid.uuid4()), user_id=user.id, job_id=req.job_id,
-                                company=req.company, role=req.role, job_url=req.job_url,
-                                platform=portal, match_score=req.match_score,
-                                status="applied", notes="Auto-submitted via Mithra AI"))
-                            await track_db.commit()
+                    body_text = (await page.locator("body").inner_text(timeout=1500)).lower()
+                    if any(t in body_text for t in ["application sent", "application submitted",
+                                                     "successfully applied", "thank you for applying",
+                                                     "application received", "applied successfully"]):
+                        confirmed = True
                 except Exception:
                     pass
-                await emit({"type":"done","success":True,"fields_filled":filled,
+                if not confirmed:
+                    # Form gone = likely submitted
+                    try:
+                        confirmed = (await _count_empty_required(page)) == [] and \
+                                    not await page.locator("button[type='submit']:visible").first.is_visible(timeout=500)
+                    except Exception:
+                        confirmed = True  # can't verify — trust the click
+                ss = await _screenshot(page)
+                await record_in_tracker()
+                await emit({"type":"done","success":True,"fields_filled":filled_total,
                             "screenshot":ss,
-                            "message":"✅ Application submitted and added to your tracker!",
+                            "message":("✅ Application submitted and added to your Tracker!"
+                                       if confirmed else
+                                       "Submitted (couldn't fully verify) — added to your Tracker; double-check via 'Open Application'."),
                             "apply_url":req.job_url,"portal":portal.title()})
+                return
             else:
-                await emit({"type":"done","success":False,"fields_filled":filled,
-                            "screenshot":ss,
-                            "message":"Couldn't find the submit button — finish manually with 'Open Application'.",
-                            "apply_url":req.job_url,"portal":portal.title()})
-        else:
-            ss = await _screenshot(page)
-            await emit({"type":"done","success":True,"fields_filled":filled,
-                        "screenshot":ss,
-                        "message":f"Auto-filled {filled} field(s). Use 'Open Application' to review and submit manually.",
-                        "apply_url":req.job_url,"portal":portal.title()})
+                # No submit button — maybe a multi-step form advanced, loop once more
+                if step >= 7:
+                    ss = await _screenshot(page)
+                    await emit({"type":"done","success":False,"fields_filled":filled_total,
+                                "screenshot":ss,
+                                "message":"Couldn't find the submit button — finish manually with 'Open Application'.",
+                                "apply_url":req.job_url,"portal":portal.title()})
+                    return
+                continue
+
+        # Loop exhausted
+        ss = await _screenshot(page)
+        await emit({"type":"done","success":False,"fields_filled":filled_total,
+                    "screenshot":ss,
+                    "message":"This portal's flow is unusual — finish manually via 'Open Application'.",
+                    "apply_url":req.job_url,"portal":portal.title()})
 
     except Exception as e:
         ss = await _screenshot(page) if browser else ""
