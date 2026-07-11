@@ -230,6 +230,46 @@ async def _dismiss_overlays(page):
         pass
 
 
+async def _on_application_form(page) -> bool:
+    """True only when we're genuinely on a job APPLICATION form — prevents the
+    agent from filling random inputs on a listings/search page and then falsely
+    claiming 'ready to submit'."""
+    # Strongest signal: a resume/file upload field
+    try:
+        if await page.locator("input[type='file']").first.is_visible(timeout=400):
+            return True
+    except Exception:
+        pass
+    # A form region containing an email OR phone input AND an apply/submit button
+    try:
+        has_contact = await page.locator(
+            "input[type='email']:visible, input[type='tel']:visible, "
+            "input[name*='phone' i]:visible, input[placeholder*='email' i]:visible"
+        ).first.is_visible(timeout=400)
+    except Exception:
+        has_contact = False
+    try:
+        has_submit = await page.locator(
+            "button:has-text('Submit application'), button:has-text('Submit Application'), "
+            "button:has-text('Send application'), button[type='submit']:visible"
+        ).first.is_visible(timeout=400)
+    except Exception:
+        has_submit = False
+    if has_contact and has_submit:
+        return True
+    # Application-specific page text near a form
+    try:
+        body = (await page.locator("body").inner_text(timeout=1000)).lower()
+        markers = ["fill out this form", "expected salary", "notice period",
+                   "upload a new resume", "upload resume", "cover letter",
+                   "years of experience", "message for recruiter"]
+        if sum(1 for m in markers if m in body) >= 2:
+            return True
+    except Exception:
+        pass
+    return False
+
+
 async def _count_empty_required(page) -> list[str]:
     """Names/placeholders of visible required inputs still empty after fill."""
     empties: list[str] = []
@@ -855,6 +895,7 @@ async def _run_submit_session(session_id: str, req: AutoSubmitRequest, user: Use
         missing_asked = 0
         confirm_shown = False
         resume_uploaded = False
+        form_retry_done = False
 
         from loguru import logger as _log
         for step in range(1, 9):
@@ -922,6 +963,36 @@ async def _run_submit_session(session_id: str, req: AutoSubmitRequest, user: Use
                 if clicked:
                     await page.wait_for_timeout(1500)
                     continue  # re-detect: apply click often triggers a login wall
+
+            # ── Gate: are we ACTUALLY on an application form? ────────────────
+            # Prevents filling random inputs on a listings/search page and then
+            # falsely claiming "ready to submit".
+            on_form = await _safe(_on_application_form(page), 10, False)
+            if not on_form:
+                # One more attempt to reach the form (a second Apply/Apply-Now click)
+                if not form_retry_done:
+                    form_retry_done = True
+                    await emit({"type":"status","message":f"Step {step}: locating the application form…"})
+                    await _safe(_try_click_apply(page), 15, False)
+                    await page.wait_for_timeout(1800)
+                    continue
+                # Genuinely no reachable form — honest handoff, no false success
+                ss = await _screenshot(page)
+                need_login = not cred and portal != "other"
+                await emit({
+                    "type": "done", "success": False, "fields_filled": filled_total,
+                    "screenshot": ss,
+                    **({"needs_credentials": portal} if need_login else {}),
+                    "message": (
+                        f"This {portal.title()} job needs you to sign in before the application form opens. "
+                        f"Add your {portal.title()} credentials above, then retry."
+                        if need_login else
+                        "Couldn't reach an application form on this portal — it likely requires signing in "
+                        "or applying on their site. Use 'Open Application' to finish."
+                    ),
+                    "apply_url": req.job_url, "portal": portal.title(),
+                })
+                return
 
             # ── Fill + verify (every op time-boxed so nothing can freeze) ─────
             await emit({"type":"status","message":f"Step {step}: filling your details…"})
