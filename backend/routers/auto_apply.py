@@ -94,6 +94,15 @@ async def _screenshot(page) -> str:
     except Exception:
         return ""
 
+async def _safe(coro, secs: float = 20.0, default=None):
+    """Run any Playwright coroutine under a HARD asyncio timeout. Guarantees no
+    single browser op can ever freeze the agent loop (root cause of 8-min hangs)."""
+    try:
+        return await asyncio.wait_for(coro, timeout=secs)
+    except (asyncio.TimeoutError, Exception):
+        return default
+
+
 async def _captcha_is_blocking(page) -> bool:
     """True only for a VISIBLE captcha challenge the user must solve.
     Nearly every site embeds an invisible reCAPTCHA for form protection — that is
@@ -330,6 +339,131 @@ async def _fill_form(page, profile: dict) -> int:
     return filled
 
 
+async def _fill_named_field(page, field_hint: str, value: str) -> bool:
+    """Fill a specific field identified by its label/placeholder/name hint."""
+    hint = (field_hint or "").lower()[:30]
+    selectors = [
+        f'input[placeholder*="{hint}" i]', f'input[name*="{hint}" i]',
+        f'input[aria-label*="{hint}" i]', f'textarea[placeholder*="{hint}" i]',
+    ]
+    for sel in selectors:
+        try:
+            el = page.locator(sel).first
+            if await el.is_visible(timeout=400):
+                await el.fill(value, timeout=2500)
+                return True
+        except Exception:
+            continue
+    # Fallback: first still-empty required field
+    try:
+        inputs = page.locator("input[required]:visible, textarea[required]:visible")
+        for i in range(min(await inputs.count(), 12)):
+            cand = inputs.nth(i)
+            try:
+                if not (await cand.input_value(timeout=300)).strip():
+                    await cand.fill(value, timeout=2500)
+                    return True
+            except Exception:
+                continue
+    except Exception:
+        pass
+    return False
+
+
+async def _fill_custom_dropdowns(page, profile: dict, resume: dict) -> int:
+    """Handle React/styled dropdowns that are NOT native <select> — click to open,
+    then click the best-matching option. Covers Qualification, Location, Department,
+    Notice Period, Experience, etc. seen on Jobaaj/Instahyre/Foundit."""
+    filled = 0
+    resume = resume or {}
+    edu = (resume.get("education") or [{}])
+    degree = (edu[0].get("degree") if edu else "") or ""
+    loc = profile.get("location", "") or ""
+    role = (resume.get("personal", {}) or {}).get("title", "") or profile.get("role", "")
+
+    # label-substring → preferred option keyword(s)
+    intents = [
+        (["qualification", "education", "degree"], [degree, "bachelor", "graduate", "b.tech", "any graduate"]),
+        (["location", "city"], [loc, "bangalore", "bengaluru"]),
+        (["department", "function", "category"], [role, "sales", "marketing", "operations", "general"]),
+        (["notice", "availability"], ["immediate", "15 days", "30 days", "1 month"]),
+        (["experience", "total exp"], ["3", "2-5", "mid"]),
+    ]
+
+    # Custom-dropdown triggers: elements that visually look like selects
+    trigger_selectors = [
+        "[class*='select']:visible", "[class*='dropdown']:visible",
+        "[role='combobox']:visible", "div[class*='control']:visible",
+        "button[aria-haspopup='listbox']:visible",
+    ]
+    try:
+        seen_labels = set()
+        for tsel in trigger_selectors:
+            triggers = page.locator(tsel)
+            tcount = min(await triggers.count(), 10)
+            for i in range(tcount):
+                trig = triggers.nth(i)
+                try:
+                    if not await trig.is_visible(timeout=200):
+                        continue
+                    # Read nearby text to infer what this dropdown is for
+                    context_txt = ""
+                    try:
+                        context_txt = (await trig.evaluate(
+                            "el => (el.closest('div')?.innerText || '').slice(0,80)"
+                        ) or "").lower()
+                    except Exception:
+                        pass
+                    if context_txt in seen_labels:
+                        continue
+                    seen_labels.add(context_txt)
+
+                    match = None
+                    for labels, options in intents:
+                        if any(l in context_txt for l in labels):
+                            match = options
+                            break
+                    if not match:
+                        continue
+
+                    # Open the dropdown
+                    await trig.click(timeout=1500)
+                    await page.wait_for_timeout(500)
+
+                    # Click the first option matching our preferred keywords
+                    picked = False
+                    for kw in [m for m in match if m]:
+                        opt = page.locator(
+                            f"[role='option']:has-text('{kw}'), li:has-text('{kw}'), "
+                            f"[class*='option']:has-text('{kw}')"
+                        ).first
+                        try:
+                            if await opt.is_visible(timeout=600):
+                                await opt.click(timeout=1200)
+                                filled += 1
+                                picked = True
+                                await page.wait_for_timeout(300)
+                                break
+                        except Exception:
+                            continue
+                    # If nothing matched, pick the first real option so validation passes
+                    if not picked:
+                        opt = page.locator("[role='option'], li[class*='option'], [class*='option']").first
+                        try:
+                            if await opt.is_visible(timeout=500):
+                                await opt.click(timeout=1200)
+                                filled += 1
+                                await page.wait_for_timeout(300)
+                        except Exception:
+                            # close the dropdown so it doesn't block other fields
+                            await page.keyboard.press("Escape")
+                except Exception:
+                    continue
+    except Exception:
+        pass
+    return filled
+
+
 async def _generate_resume_pdf(context, resume: dict, name: str) -> str:
     """Render the resume JSON to a simple PDF and return the temp file path.
     Used to attach to portal file-upload fields. Returns '' on failure."""
@@ -441,7 +575,9 @@ async def _fill_choices(page, profile: dict) -> int:
     except Exception:
         pass
 
-    # Yes/No radio groups — choose the affirmative option
+    # Yes/No radio groups — answer affirmatively, EXCEPT "fresher?" which should
+    # be "No" for anyone with work experience (Jobaaj defaults it wrongly to Yes)
+    is_experienced = bool(profile.get("_has_experience"))
     try:
         radios = page.locator("input[type='radio']:visible")
         rc = await radios.count()
@@ -453,13 +589,24 @@ async def _fill_choices(page, profile: dict) -> int:
                 if nm in seen_names:
                     continue
                 label = ((await r.get_attribute("value")) or "").lower()
-                # aria-label or adjacent label text
                 aria = ((await r.get_attribute("aria-label")) or "").lower()
-                if any(w in label or w in aria for w in yes_words):
-                    if not await r.is_checked():
-                        await r.check(timeout=1000)
-                        filled += 1
-                        if nm: seen_names.add(nm)
+                # Read the group's question text to detect "fresher"
+                q = ""
+                try:
+                    q = (await r.evaluate("el => (el.closest('div')?.innerText||'').slice(0,60)") or "").lower()
+                except Exception:
+                    pass
+                want_no = ("fresher" in q or "fresher" in aria) and is_experienced
+                want = "no" if want_no else None
+                pick = False
+                if want == "no":
+                    pick = ("no" == label or "false" == label or "no" in aria)
+                else:
+                    pick = any(w in label or w in aria for w in yes_words)
+                if pick and not await r.is_checked():
+                    await r.check(timeout=1000)
+                    filled += 1
+                    if nm: seen_names.add(nm)
             except Exception:
                 continue
     except Exception:
@@ -672,8 +819,8 @@ async def _run_submit_session(session_id: str, req: AutoSubmitRequest, user: Use
 
         from loguru import logger as _log
         for step in range(1, 9):
-            await _dismiss_overlays(page)
-            state = await _detect_blocker(page)
+            await _safe(_dismiss_overlays(page), 25, None)
+            state = await _safe(_detect_blocker(page), 15, "")
             _log.info(f"[auto-apply {session_id[:8]}] step {step}: state={state or 'ok'} applied_clicked={applied_clicked} filled={filled_total}")
             ss = await _screenshot(page)
             await emit({"type":"screenshot","data":ss})
@@ -722,46 +869,40 @@ async def _run_submit_session(session_id: str, req: AutoSubmitRequest, user: Use
             # ── Reach the application form ───────────────────────────────────
             if not applied_clicked:
                 await emit({"type":"status","message":f"Step {step}: opening the application form…"})
-                clicked = await _try_click_apply(page)
+                clicked = await _safe(_try_click_apply(page), 20, False)
                 applied_clicked = True
                 if clicked:
                     await page.wait_for_timeout(1500)
                     continue  # re-detect: apply click often triggers a login wall
 
-            # ── Fill + verify ────────────────────────────────────────────────
+            # ── Fill + verify (every op time-boxed so nothing can freeze) ─────
             await emit({"type":"status","message":f"Step {step}: filling your details…"})
-            filled_total += await _fill_form(page, req.profile)
+            filled_total += await _safe(_fill_form(page, req.profile), 45, 0) or 0
             # Attach resume to any file-upload field
             if resume_pdf and not resume_uploaded:
-                if await _upload_resume(page, resume_pdf):
+                if await _safe(_upload_resume(page, resume_pdf), 30, False):
                     resume_uploaded = True
                     filled_total += 1
                     await emit({"type":"status","message":"Attached your resume ✓"})
-            # Dropdowns, consent checkboxes, yes/no radios
-            filled_total += await _fill_choices(page, req.profile)
-            empties = await _count_empty_required(page)
+            # Native + custom dropdowns, consent checkboxes, yes/no radios
+            filled_total += await _safe(_fill_choices(page, req.profile), 45, 0) or 0
+            filled_total += await _safe(_fill_custom_dropdowns(page, req.profile, req.resume), 45, 0) or 0
+            empties = await _safe(_count_empty_required(page), 15, []) or []
 
-            if empties and missing_asked < 2:
+            if empties and missing_asked < 3:
                 missing_asked += 1
                 field_name = empties[0]
                 ss = await _screenshot(page)
                 await emit({"type":"input_needed","field":"missing_info",
-                            "message":f"The form needs '{field_name}' which isn't in your profile — type it below:",
+                            "message":f"The form needs '{field_name}' — type the value below and I'll fill it:",
                             "screenshot":ss})
                 answer = await wait_input(240)
                 if answer:
-                    try:
-                        # fill the first still-empty required field
-                        inputs = page.locator("input[required]:visible, textarea[required]:visible")
-                        for i in range(min(await inputs.count(), 12)):
-                            cand = inputs.nth(i)
-                            if not (await cand.input_value(timeout=300)).strip():
-                                await cand.fill(answer)
-                                filled_total += 1
-                                break
-                    except Exception:
-                        pass
+                    await _safe(_fill_named_field(page, field_name, answer), 15, None)
+                    filled_total += 1
                     continue  # re-verify
+                # No answer within timeout — stop asking, move to confirm/handoff
+                missing_asked = 3
 
             # ── Confirm & submit ─────────────────────────────────────────────
             if not confirm_shown:
@@ -784,7 +925,7 @@ async def _run_submit_session(session_id: str, req: AutoSubmitRequest, user: Use
                     return
 
             await emit({"type":"status","message":f"Step {step}: submitting…"})
-            submitted = await _try_click_submit(page)
+            submitted = await _safe(_try_click_submit(page), 20, False)
             await page.wait_for_timeout(2000)
 
             if submitted:
