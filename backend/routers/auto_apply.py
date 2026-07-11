@@ -501,7 +501,6 @@ async def _run_submit_session(session_id: str, req: AutoSubmitRequest, user: Use
                 answer = await wait_input(240)
                 if answer:
                     try:
-                        el = page.locator("input[required]:visible, textarea[required]:visible").first
                         # fill the first still-empty required field
                         inputs = page.locator("input[required]:visible, textarea[required]:visible")
                         for i in range(min(await inputs.count(), 12)):
