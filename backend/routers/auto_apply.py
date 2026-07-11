@@ -131,12 +131,16 @@ async def _detect_blocker(page) -> str:
 
 
 async def _dismiss_overlays(page):
-    """Close cookie banners and dismissible modals that block interaction."""
-    for sel in [
+    """Close cookie banners, consent dialogs and dismissible modals — including
+    TCF consent prompts living inside iframes."""
+    selectors = [
         "button:has-text('Accept')", "button:has-text('Accept all')",
+        "button:has-text('AGREE')", "button:has-text('Agree')",
+        "button:has-text('Consent')", "button[mode='primary']",
         "button[aria-label='Dismiss']", "button.modal__dismiss",
         "icon[type='cancel-icon']", "button:has-text('✕')",
-    ]:
+    ]
+    for sel in selectors:
         try:
             el = page.locator(sel).first
             if await el.is_visible(timeout=250):
@@ -144,6 +148,20 @@ async def _dismiss_overlays(page):
                 await page.wait_for_timeout(400)
         except Exception:
             continue
+    # Consent prompts inside iframes (TCF / CMP frameworks)
+    try:
+        for frame in page.frames[1:6]:
+            for sel in ["button:has-text('Accept')", "button:has-text('AGREE')", "button:has-text('Consent')"]:
+                try:
+                    el = frame.locator(sel).first
+                    if await el.is_visible(timeout=200):
+                        await el.click(timeout=800)
+                        await page.wait_for_timeout(400)
+                        return
+                except Exception:
+                    continue
+    except Exception:
+        pass
 
 
 async def _count_empty_required(page) -> list[str]:
@@ -234,7 +252,8 @@ async def _fill_form(page, profile: dict) -> int:
             try:
                 el = page.locator(sel).first
                 if await el.is_visible(timeout=400) and await el.is_enabled(timeout=400):
-                    await el.clear(); await el.type(value, delay=25)
+                    # fill() with a hard timeout — .type() could stall for 30s per field
+                    await el.fill(value, timeout=2500)
                     filled += 1; break
             except: continue
     return filled
@@ -335,6 +354,9 @@ async def _run_submit_session(session_id: str, req: AutoSubmitRequest, user: Use
 
     async def wait_input(timeout=180) -> Optional[str]:
         evt: asyncio.Event = session["input_event"]
+        # Discard any stale input from a previous (possibly timed-out) prompt
+        evt.clear()
+        session["input_value"] = None
         try:
             await asyncio.wait_for(evt.wait(), timeout=timeout)
             evt.clear()
@@ -431,9 +453,11 @@ async def _run_submit_session(session_id: str, req: AutoSubmitRequest, user: Use
         missing_asked = 0
         confirm_shown = False
 
+        from loguru import logger as _log
         for step in range(1, 9):
             await _dismiss_overlays(page)
             state = await _detect_blocker(page)
+            _log.info(f"[auto-apply {session_id[:8]}] step {step}: state={state or 'ok'} applied_clicked={applied_clicked} filled={filled_total}")
             ss = await _screenshot(page)
             await emit({"type":"screenshot","data":ss})
 
@@ -583,7 +607,12 @@ async def _run_submit_session(session_id: str, req: AutoSubmitRequest, user: Use
                     "message":"This portal's flow is unusual — finish manually via 'Open Application'.",
                     "apply_url":req.job_url,"portal":portal.title()})
 
+    except asyncio.CancelledError:
+        # Watchdog cancelled us — the wrapper emits the timeout message
+        raise
     except Exception as e:
+        from loguru import logger
+        logger.error(f"[auto-apply {session_id[:8]}] session error: {e!r}")
         ss = await _screenshot(page) if browser else ""
         await emit({"type":"done","success":False,"fields_filled":0,
                     "screenshot":ss,"message":f"Error: {str(e)[:120]}",
@@ -593,7 +622,27 @@ async def _run_submit_session(session_id: str, req: AutoSubmitRequest, user: Use
         except: pass
         try: await pw_ctx.__aexit__(None, None, None)
         except: pass
-        await asyncio.sleep(120)
+
+
+async def _run_with_watchdog(session_id: str, req: AutoSubmitRequest, user: User):
+    """Hard 8-minute ceiling on any auto-apply session — a stuck Playwright call
+    can never leave the user staring at a frozen status again."""
+    from loguru import logger
+    try:
+        await asyncio.wait_for(_run_submit_session(session_id, req, user), timeout=480)
+    except asyncio.TimeoutError:
+        logger.warning(f"[auto-apply {session_id[:8]}] watchdog fired — session killed at 8 min")
+        session = _sessions.get(session_id)
+        if session:
+            await session["queue"].put({
+                "type": "done", "success": False,
+                "message": "This session took too long and was stopped — finish manually via 'Open Application'.",
+                "apply_url": req.job_url,
+            })
+    except Exception as e:
+        logger.error(f"[auto-apply {session_id[:8]}] wrapper error: {e!r}")
+    finally:
+        await asyncio.sleep(120)  # let the SSE reader drain, then free the session
         _sessions.pop(session_id, None)
 
 
@@ -738,8 +787,8 @@ async def start_submit(req: AutoSubmitRequest,
         "input_value": None,
         "user_id": current_user.id,
     }
-    # Run Playwright in background — task opens its own DB sessions
-    asyncio.create_task(_run_submit_session(sid, req, current_user))
+    # Run Playwright in background under an 8-minute watchdog
+    asyncio.create_task(_run_with_watchdog(sid, req, current_user))
     return {"session_id": sid}
 
 @router.get("/submit/stream/{session_id}")
