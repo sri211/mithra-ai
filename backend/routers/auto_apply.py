@@ -230,6 +230,41 @@ async def _dismiss_overlays(page):
         pass
 
 
+LOGINNABLE_PORTALS = {"linkedin", "naukri", "instahyre"}
+
+
+async def _is_logged_out(page, portal: str) -> bool:
+    """True when the page shows a signed-out state (Sign in / Join now / authwall).
+    Works even when there's no password field yet (LinkedIn public job view)."""
+    # Logged-IN indicators — if present, we're authenticated, bail early
+    logged_in_markers = {
+        "linkedin": ["img.global-nav__me-photo", ".global-nav__me", "div.global-nav__me"],
+        "naukri": [".nI-gNb-drawer__icon", ".view-profile-wrapper", "img.nI-gNb-menuIcon__pic"],
+        "instahyre": [".navbar-profile", "a[href*='logout']"],
+    }.get(portal, [])
+    for sel in logged_in_markers:
+        try:
+            if await page.locator(sel).first.is_visible(timeout=300):
+                return False
+        except Exception:
+            pass
+    # Signed-OUT affordances
+    signout_selectors = [
+        "a[href*='/login']", "a[href*='signin' i]",
+        "button:has-text('Sign in')", "a:has-text('Sign in')",
+        "button:has-text('Join now')", "a:has-text('Join now')",
+        ".authwall", ".sign-in-form", "a.nav__button-secondary",
+        "div.nI-gNb-log-reg",  # naukri logged-out nav
+    ]
+    for sel in signout_selectors:
+        try:
+            if await page.locator(sel).first.is_visible(timeout=300):
+                return True
+        except Exception:
+            pass
+    return False
+
+
 async def _on_application_form(page) -> bool:
     """True only when we're genuinely on a job APPLICATION form — prevents the
     agent from filling random inputs on a listings/search page and then falsely
@@ -896,6 +931,7 @@ async def _run_submit_session(session_id: str, req: AutoSubmitRequest, user: Use
         confirm_shown = False
         resume_uploaded = False
         form_retry_done = False
+        did_login = False
 
         from loguru import logger as _log
         for step in range(1, 9):
@@ -910,7 +946,14 @@ async def _run_submit_session(session_id: str, req: AutoSubmitRequest, user: Use
                 return
             await _safe(_dismiss_overlays(page), 25, None)
             state = await _safe(_detect_blocker(page), 15, "")
-            _log.info(f"[auto-apply {session_id[:8]}] step {step}: state={state or 'ok'} applied_clicked={applied_clicked} filled={filled_total}")
+            # Proactive login: we have credentials for a loginnable portal and the
+            # page is showing a signed-out state (e.g. LinkedIn public job view with
+            # a 'Sign in' button but no password field). Log in BEFORE giving up.
+            if (state != "login" and cred and not did_login
+                    and portal in LOGINNABLE_PORTALS and login_attempts < 2):
+                if await _safe(_is_logged_out(page, portal), 8, False):
+                    state = "login"
+            _log.info(f"[auto-apply {session_id[:8]}] step {step}: state={state or 'ok'} applied_clicked={applied_clicked} filled={filled_total} did_login={did_login}")
             ss = await _screenshot(page)
             await emit({"type":"screenshot","data":ss})
 
@@ -932,6 +975,8 @@ async def _run_submit_session(session_id: str, req: AutoSubmitRequest, user: Use
                 await emit({"type":"status","message":f"Step {step}: logging in to {portal.title()}…"})
                 lr = await login_with_otp()
                 if lr == "success":
+                    did_login = True
+                    applied_clicked = False  # re-find Apply now that we're authenticated
                     await emit({"type":"status","message":"Logged in ✓ — returning to the job…"})
                     try: await page.goto(req.job_url, wait_until="domcontentloaded", timeout=22000)
                     except Exception: pass
