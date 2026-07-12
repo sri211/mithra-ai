@@ -36,8 +36,8 @@ async def extension_profile(
         select(SavedResume).where(SavedResume.user_id == current_user.id)
         .order_by(desc(SavedResume.created_at)).limit(1)
     )
-    resume = (res.scalars().first().resume_json if res else {}) or {}
-    resume = resume or {}
+    row = res.scalars().first()
+    resume = (row.resume_json if row else {}) or {}
     personal = resume.get("personal", {}) or {}
     name = personal.get("name") or current_user.name or ""
     parts = name.split()
