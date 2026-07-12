@@ -695,14 +695,47 @@ async def _try_portal_login(page, portal: str, username: str, password: str) -> 
         if portal == "linkedin":
             await page.goto("https://www.linkedin.com/login", wait_until="domcontentloaded", timeout=20000)
             await page.wait_for_timeout(1500)
-            await page.fill("#username", username, timeout=5000)
-            await page.fill("#password", password, timeout=5000)
-            await page.click("button[type='submit']", timeout=5000)
-            await page.wait_for_timeout(4000)
+            # If LinkedIn shows a social-login-only page, try to reveal the email form
+            try:
+                if not await page.locator("#username, input[name='session_key']").first.is_visible(timeout=1500):
+                    for rev in ["a:has-text('Sign in with email')", "button:has-text('Sign in with email')",
+                                "a:has-text('email')", "a[href*='login']"]:
+                        try:
+                            el = page.locator(rev).first
+                            if await el.is_visible(timeout=600):
+                                await el.click(timeout=1500); await page.wait_for_timeout(1200); break
+                        except Exception:
+                            continue
+            except Exception:
+                pass
+            # Fill username/password (multiple selector variants)
+            u_ok = p_ok = False
+            for sel in ["#username", "input[name='session_key']", "input[autocomplete='username']"]:
+                try:
+                    await page.fill(sel, username, timeout=2500); u_ok = True; break
+                except Exception:
+                    continue
+            for sel in ["#password", "input[name='session_password']", "input[type='password']"]:
+                try:
+                    await page.fill(sel, password, timeout=2500); p_ok = True; break
+                except Exception:
+                    continue
+            if not (u_ok and p_ok):
+                # No password form offered — LinkedIn is serving a social-only / anti-bot page
+                return "blocked"
+            for sel in ["button[type='submit']", "button[data-litms-control-urn*='login']", "button:has-text('Sign in')"]:
+                try:
+                    await page.click(sel, timeout=3000); break
+                except Exception:
+                    continue
+            await page.wait_for_timeout(4500)
             url = page.url.lower()
-            if "/feed" in url or "/jobs" in url or "/in/" in url: return "success"
-            if "checkpoint" in url or "challenge" in url or "verification" in url: return "otp"
-            if "captcha" in url: return "captcha"
+            if "/feed" in url or "/jobs" in url or "/in/" in url or "linkedin.com/checkpoint/lg/login-submit" not in url and "login" not in url:
+                return "success"
+            if "checkpoint" in url or "challenge" in url or "verification" in url or "add-phone" in url:
+                return "otp"
+            if "captcha" in url:
+                return "captcha"
             return "failed"
 
         elif portal == "naukri":
@@ -991,6 +1024,13 @@ async def _run_submit_session(session_id: str, req: AutoSubmitRequest, user: Use
                     await emit({"type":"done","success":False,"screenshot":ss,
                                 "message":f"{portal.title()} demanded a CAPTCHA at login — apply manually via 'Open Application'.",
                                 "apply_url":req.job_url})
+                    return
+                if lr == "blocked":
+                    await emit({"type":"done","success":False,"screenshot":ss,
+                                "message":(f"{portal.title()} is blocking automated sign-in from our server "
+                                           "(it only offered social login). This is their anti-bot protection — "
+                                           "please apply while signed in on your own browser via 'Open Application'."),
+                                "apply_url":req.job_url,"portal":portal.title()})
                     return
                 continue  # failed → loop retries once more
 
