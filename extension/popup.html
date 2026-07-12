@@ -1,0 +1,46 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8" />
+<style>
+  body { width: 300px; margin: 0; font-family: -apple-system, "Segoe UI", system-ui, sans-serif;
+    background: #FAF7F1; color: #14281E; }
+  .hd { background: linear-gradient(178deg,#0C221B,#0A1D17); padding: 16px; }
+  .hd .logo { color: #E9C46A; font-weight: 700; font-size: 17px; }
+  .hd .sub { color: rgba(245,241,230,.55); font-size: 11.5px; margin-top: 2px; }
+  .body { padding: 16px; }
+  .row { display: flex; align-items: center; gap: 8px; font-size: 13px; margin-bottom: 12px; }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: #9ca3af; }
+  .dot.on { background: #10b981; } .dot.off { background: #ef4444; }
+  .who { font-size: 12.5px; color: #14281E; font-weight: 600; }
+  .who small { display: block; color: #8A8474; font-weight: 400; font-size: 11px; }
+  .btn { width: 100%; padding: 10px; border: none; border-radius: 10px; cursor: pointer;
+    font-weight: 700; font-size: 13px; margin-top: 6px; }
+  .btn-primary { background: linear-gradient(135deg,#0F6E55,#0A523F); color: #fff; }
+  .btn-ghost { background: #fff; border: 1px solid rgba(0,0,0,.12); color: #555; }
+  .steps { font-size: 12px; color: #6b7280; line-height: 1.7; margin-top: 12px;
+    background: #fff; border: 1px solid rgba(0,0,0,.08); border-radius: 10px; padding: 12px; }
+  .steps b { color: #14281E; }
+  .cr { font-size: 11px; color: #8A8474; margin-top: 10px; text-align: center; }
+</style>
+</head>
+<body>
+  <div class="hd">
+    <div class="logo">✦ Mithra Auto-Apply</div>
+    <div class="sub">Applies in your own browser — no bot walls.</div>
+  </div>
+  <div class="body">
+    <div class="row"><span class="dot" id="dot"></span><span id="statusText">Checking connection…</span></div>
+    <div id="whoBox" class="who" style="display:none"></div>
+    <button class="btn btn-primary" id="connectBtn" style="display:none">Connect my Mithra account</button>
+    <div class="steps">
+      <b>How to use:</b><br>
+      1. Open a job on LinkedIn / Naukri / a company site.<br>
+      2. The <b>✦ Mithra</b> panel appears bottom-right.<br>
+      3. Click <b>Auto-Fill &amp; Apply</b> → review → submit.
+    </div>
+    <div class="cr" id="credits"></div>
+  </div>
+<script src="popup.js"></script>
+</body>
+</html>

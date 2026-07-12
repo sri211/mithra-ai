@@ -1,0 +1,40 @@
+#mithra-panel {
+  position: fixed; bottom: 20px; right: 20px; z-index: 2147483647;
+  width: 300px; background: #fff; border-radius: 14px;
+  box-shadow: 0 12px 48px rgba(12,34,27,0.28); overflow: hidden;
+  font-family: -apple-system, "Segoe UI", system-ui, sans-serif;
+  border: 1px solid rgba(15,110,85,0.2);
+}
+#mithra-panel .mithra-hd {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 12px 14px; background: linear-gradient(178deg,#0C221B,#0A1D17);
+}
+#mithra-panel .mithra-logo { color: #E9C46A; font-weight: 700; font-size: 15px; letter-spacing: .3px; }
+#mithra-panel .mithra-x { background: rgba(255,255,255,.12); border: none; color: #F5F1E6;
+  width: 24px; height: 24px; border-radius: 7px; cursor: pointer; font-size: 15px; line-height: 1; }
+#mithra-panel .mithra-body { padding: 14px; }
+#mithra-panel .mithra-status { font-size: 13px; color: #14281E; line-height: 1.5; margin-bottom: 10px; }
+#mithra-panel .mithra-log { max-height: 120px; overflow-y: auto; font-size: 11.5px; color: #6b7280;
+  margin-bottom: 10px; }
+#mithra-panel .mithra-log div { margin: 2px 0; }
+#mithra-panel .mithra-go {
+  width: 100%; padding: 11px; border: none; border-radius: 10px; cursor: pointer;
+  background: linear-gradient(135deg,#0F6E55,#0A523F); color: #fff; font-weight: 700; font-size: 14px;
+}
+#mithra-panel .mithra-go:disabled { opacity: .6; cursor: default; }
+#mithra-panel .mithra-hint { font-size: 11px; color: #9ca3af; text-align: center; margin-top: 8px; }
+#mithra-panel .mithra-ask { margin-top: 10px; padding: 10px; border-radius: 10px;
+  background: rgba(233,196,106,.1); border: 1px solid rgba(233,196,106,.35); }
+#mithra-panel .mithra-ask-q { font-size: 12px; color: #14281E; margin-bottom: 8px; font-weight: 600; }
+#mithra-panel .mithra-ask-in { width: 100%; padding: 8px 10px; border-radius: 8px;
+  border: 1px solid rgba(0,0,0,.15); font-size: 13px; box-sizing: border-box; }
+#mithra-panel .mithra-ask-row { display: flex; gap: 8px; margin-top: 8px; }
+#mithra-panel .mithra-ask-ok { flex: 1; padding: 8px; border: none; border-radius: 8px;
+  background: #0F6E55; color: #fff; font-weight: 700; cursor: pointer; font-size: 12px; }
+#mithra-panel .mithra-ask-skip { padding: 8px 12px; border: 1px solid rgba(0,0,0,.15);
+  border-radius: 8px; background: #fff; color: #666; cursor: pointer; font-size: 12px; }
+#mithra-panel .mithra-confirm { display: flex; flex-direction: column; gap: 8px; margin-top: 10px; }
+#mithra-panel .mithra-submit { padding: 11px; border: none; border-radius: 10px;
+  background: linear-gradient(135deg,#10b981,#059669); color: #fff; font-weight: 800; cursor: pointer; font-size: 14px; }
+#mithra-panel .mithra-manual { padding: 9px; border: 1px solid rgba(0,0,0,.15);
+  border-radius: 10px; background: #fff; color: #555; cursor: pointer; font-size: 12px; }
