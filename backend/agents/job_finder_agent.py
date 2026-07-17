@@ -347,15 +347,8 @@ async def fetch_jobs_from_jsearch(
     search_query = f"{query} {location}".strip()
     url = "https://jsearch.p.rapidapi.com/search"
     params = {"query": search_query, "page": "1", "num_pages": "2", "date_posted": "all"}
-    # JSearch supports narrowing to specific job boards
-    if portals:
-        pub_map = {
-            "linkedin": "linkedin.com", "indeed": "indeed.com", "naukri": "naukri.com",
-            "glassdoor": "glassdoor.com", "google": "google.com", "instahyre": "instahyre.com",
-        }
-        pubs = [pub_map[p.lower()] for p in portals if p.lower() in pub_map]
-        if pubs:
-            params["publishers"] = ",".join(pubs)
+    # NOTE: JSearch rejects the `publishers` param on this plan (405), so platform
+    # narrowing is done locally in the router instead of at the API.
     headers = {
         "X-RapidAPI-Key": RAPIDAPI_KEY,
         "X-RapidAPI-Host": "jsearch.p.rapidapi.com",

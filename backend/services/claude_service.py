@@ -78,34 +78,44 @@ async def complete_claude_json(
 
 
 def _extract_json(text: str) -> str:
-    """Strip markdown code fences and extract the first valid JSON object/array."""
+    """Strip markdown code fences and extract the outermost JSON value.
+
+    IMPORTANT: whichever of '{' or '[' appears FIRST is the real start of the
+    payload. Always probing '{' first would grab the first object *inside* an
+    array (e.g. `[{...},{...}]` → `{...}`), silently turning a list of results
+    into a single dict — which callers then read as "empty".
+    """
     import re
     # Remove ```json ... ``` or ``` ... ``` wrappers
     text = re.sub(r"^```(?:json)?\s*", "", text.strip(), flags=re.MULTILINE)
     text = re.sub(r"\s*```$", "", text.strip(), flags=re.MULTILINE)
     text = text.strip()
-    # Find the outermost { } or [ ] block
-    for start_char, end_char in [('{', '}'), ('[', ']')]:
-        start = text.find(start_char)
-        if start == -1:
+
+    obj_at = text.find("{")
+    arr_at = text.find("[")
+    candidates = [p for p in ((obj_at, "{", "}"), (arr_at, "[", "]")) if p[0] != -1]
+    if not candidates:
+        return text
+    start, start_char, end_char = min(candidates, key=lambda p: p[0])
+
+    depth = 0
+    in_string = False
+    escape_next = False
+    for i, ch in enumerate(text[start:], start):
+        if escape_next:
+            escape_next = False
             continue
-        depth = 0
-        in_string = False
-        escape_next = False
-        for i, ch in enumerate(text[start:], start):
-            if escape_next:
-                escape_next = False
-                continue
-            if ch == '\\' and in_string:
-                escape_next = True
-                continue
-            if ch == '"' and not escape_next:
-                in_string = not in_string
-            if not in_string:
-                if ch == start_char:
-                    depth += 1
-                elif ch == end_char:
-                    depth -= 1
-                    if depth == 0:
-                        return text[start:i+1]
+        if ch == "\\" and in_string:
+            escape_next = True
+            continue
+        if ch == '"':
+            in_string = not in_string
+            continue
+        if not in_string:
+            if ch == start_char:
+                depth += 1
+            elif ch == end_char:
+                depth -= 1
+                if depth == 0:
+                    return text[start:i + 1]
     return text
