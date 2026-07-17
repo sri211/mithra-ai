@@ -191,6 +191,8 @@ async def generate_jobs_with_claude(
     experience_years: int = 0,
     remote: str = "",
     salary_min: int = 0,
+    portals: list[str] = None,
+    company: str = "",
 ) -> list[dict]:
     """Use Claude to generate realistic, relevant job listings for any search query."""
     context_parts = [f"Search query: {query}"]
@@ -203,6 +205,15 @@ async def generate_jobs_with_claude(
     if salary_min:
         salary_l = salary_min // 100000
         context_parts.append(f"Minimum salary: ₹{salary_l}L per year")
+    if company:
+        context_parts.append(
+            f"Company: {company} — EVERY job MUST be at {company}. Generate only real, "
+            f"plausible openings at {company} that fit the search query."
+        )
+    if portals:
+        context_parts.append(
+            f"Portals: only use these values for the `portal` field: {', '.join(portals)}"
+        )
 
     content = "\n".join(context_parts)
     content += "\n\nGenerate EXACTLY 8 realistic job listings. ALL must closely match the search query. Use the specified location and salary range."
@@ -327,6 +338,7 @@ async def generate_jobs_with_resume(
 async def fetch_jobs_from_jsearch(
     query: str,
     location: str = "",
+    portals: list[str] = None,
 ) -> list[dict]:
     """Fetch real job listings from JSearch API (RapidAPI). Returns [] on failure."""
     if not RAPIDAPI_KEY:
@@ -335,6 +347,15 @@ async def fetch_jobs_from_jsearch(
     search_query = f"{query} {location}".strip()
     url = "https://jsearch.p.rapidapi.com/search"
     params = {"query": search_query, "page": "1", "num_pages": "2", "date_posted": "all"}
+    # JSearch supports narrowing to specific job boards
+    if portals:
+        pub_map = {
+            "linkedin": "linkedin.com", "indeed": "indeed.com", "naukri": "naukri.com",
+            "glassdoor": "glassdoor.com", "google": "google.com", "instahyre": "instahyre.com",
+        }
+        pubs = [pub_map[p.lower()] for p in portals if p.lower() in pub_map]
+        if pubs:
+            params["publishers"] = ",".join(pubs)
     headers = {
         "X-RapidAPI-Key": RAPIDAPI_KEY,
         "X-RapidAPI-Host": "jsearch.p.rapidapi.com",
@@ -429,12 +450,15 @@ async def fetch_jobs_from_jsearch(
         return []
 
 
-async def get_job_pool(query: str, location: str = "") -> list[dict]:
-    """Shared cached job pool. One external fetch per query+location per 24h serves all users.
+async def get_job_pool(query: str, location: str = "",
+                       portals: list[str] = None, company: str = "") -> list[dict]:
+    """Shared cached job pool. One external fetch per query+location+portals+company
+    per 24h serves all users.
 
     Returns jobs WITHOUT per-user scores — the router scores them locally per resume.
     """
-    cached = await cache_get("jobs", query, location)
+    portal_key = ",".join(sorted(p.lower() for p in (portals or [])))
+    cached = await cache_get("jobs", query, location, portal_key, company)
     if cached and isinstance(cached, list) and len(cached) > 0:
         return cached
 
@@ -442,12 +466,12 @@ async def get_job_pool(query: str, location: str = "") -> list[dict]:
 
     # 1. Real listings first
     if RAPIDAPI_KEY:
-        jobs = await fetch_jobs_from_jsearch(query, location)
+        jobs = await fetch_jobs_from_jsearch(query, location, portals=portals)
 
     # 2. Supplement to 8 with Haiku generation (cheap; also cached with the pool)
     if len(jobs) < 8:
         needed = 8 - len(jobs)
-        extra = await generate_jobs_with_claude(query, location)
+        extra = await generate_jobs_with_claude(query, location, portals=portals, company=company)
         for job in extra[:needed]:
             job["is_real_listing"] = False
             if not job.get("url") or job["url"] in ("#", ""):
@@ -467,7 +491,7 @@ async def get_job_pool(query: str, location: str = "") -> list[dict]:
 
     # Full pools cache 24h; thin results retry sooner
     ttl = 24 if len(jobs) >= 5 else 1
-    await cache_set("jobs", jobs, ttl, query, location)
+    await cache_set("jobs", jobs, ttl, query, location, portal_key, company)
     return jobs
 
 

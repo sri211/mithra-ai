@@ -8,6 +8,7 @@ from db.models import JobSearch
 from middleware.auth import get_optional_user
 from agents.job_finder_agent import get_job_pool, get_job_details
 from services.match_scorer import score_jobs_for_resume
+from services.company_size import classify_company, matches_company_type
 
 router = APIRouter()
 
@@ -19,7 +20,9 @@ class JobSearchRequest(BaseModel):
     salary_min: int = 0
     job_type: str = ""
     remote: str = ""
-    portals: list[str] = []
+    portals: list[str] = []          # e.g. ["LinkedIn","Naukri","Indeed","Google"]
+    company_type: str = ""           # "" | "small" | "mid" | "large" (comma-separated ok)
+    company_name: str = ""           # optional — show only this company's roles
     user_profile: dict = {}
     resume_profile: dict = {}
 
@@ -47,27 +50,55 @@ async def search(
 
     has_resume = bool(req.resume_profile and req.resume_profile.get("personal"))
 
-    # Resolve the effective query: explicit text, else derived from resume
     effective_query = (req.query or "").strip()
     if not effective_query and has_resume:
         effective_query = _query_from_resume(req.resume_profile)
     if not effective_query:
         effective_query = "software engineer"
 
-    # Shared cached pool: one external fetch per query+location per 24h serves all users
-    jobs = await get_job_pool(effective_query, req.location)
+    # A company filter becomes part of the search itself so the pool is that
+    # company's roles, matched to the user's profile/query.
+    company_name = (req.company_name or "").strip()
+    pool_query = f"{effective_query} at {company_name}" if company_name else effective_query
 
-    # Per-user filters (free, local)
+    # Platform preference is part of the cache key — different portals, different pool
+    portals = [p for p in (req.portals or []) if p and p.lower() != "all"]
+    portal_key = ",".join(sorted(p.lower() for p in portals))
+
+    jobs = await get_job_pool(pool_query, req.location, portals=portals, company=company_name)
+
+    # ── Local filters (free) ────────────────────────────────────────────
+    def keep_min(lst, n=3):
+        return lst if len(lst) >= n else None
+
+    if company_name:
+        want = company_name.lower()
+        filtered = [j for j in jobs if want in (j.get("company") or "").lower()]
+        # If the portal returned nothing for that company, keep the generated pool
+        jobs = filtered or jobs
+
+    if req.company_type:
+        filtered = [j for j in jobs if matches_company_type(j.get("company", ""), req.company_type)]
+        jobs = keep_min(filtered) or jobs
+
+    if portals:
+        wanted = {p.lower() for p in portals}
+        filtered = [j for j in jobs if (j.get("portal") or "").lower() in wanted]
+        jobs = keep_min(filtered) or jobs
+
     if req.remote and req.remote != "All":
         filtered = [j for j in jobs if (j.get("remote") or "").lower() == req.remote.lower()]
-        if len(filtered) >= 3:
-            jobs = filtered
+        jobs = keep_min(filtered) or jobs
+
     if req.salary_min:
         filtered = [j for j in jobs if (j.get("salary_max") or 0) == 0 or (j.get("salary_max") or 0) >= req.salary_min]
-        if len(filtered) >= 3:
-            jobs = filtered
+        jobs = keep_min(filtered) or jobs
 
-    # Local deterministic resume scoring — zero API cost, consistent results
+    # Tag every job with its company size so the UI can show it
+    for j in jobs:
+        j["company_type"] = classify_company(j.get("company", ""))
+
+    # Local deterministic resume scoring — zero API cost
     if has_resume:
         jobs = score_jobs_for_resume(jobs, req.resume_profile)
     else:
@@ -80,9 +111,9 @@ async def search(
         db.add(JobSearch(
             id=str(uuid.uuid4()),
             user_id=current_user.id,
-            query=effective_query,
+            query=effective_query + (f" @{company_name}" if company_name else ""),
             location=req.location or None,
-            results_json={"count": len(jobs)},
+            results_json={"count": len(jobs), "portals": portal_key, "company_type": req.company_type},
         ))
         await db.commit()
 

@@ -226,6 +226,14 @@ async def upload_resume_file(file: UploadFile = File(...)):
     ext = filename.lower().rsplit(".", 1)[-1]
     content = await file.read()
 
+    # Read the file's DESIGN (fonts, accent colours, columns) so the adapted
+    # resume comes back in the same visual style the user uploaded. Local, free.
+    try:
+        from services.template_detect import detect_template
+        detected = detect_template(content, ext)
+    except Exception:
+        detected = {"template": "modern", "confidence": 0.0, "signals": {}}
+
     text = ""
 
     if ext == "pdf":
@@ -289,7 +297,14 @@ Extract every field exactly as it appears. Do not change job titles, industries,
     try:
         raw = await ccj(SYSTEM_EXTRACT, [{"role": "user", "content": prompt}], max_tokens=8192)
         resume = _parse_json_resilient(raw, filename)
-        return {"resume": resume, "chars_extracted": len(text), "pages": text.count("\n\n")}
+        return {
+            "resume": resume,
+            "chars_extracted": len(text),
+            "pages": text.count("\n\n"),
+            "detected_template": detected.get("template", "modern"),
+            "template_confidence": detected.get("confidence", 0.0),
+            "template_signals": detected.get("signals", {}),
+        }
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"AI parsing failed: {str(e)}")
 

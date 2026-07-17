@@ -10,7 +10,7 @@ load_dotenv()
 
 from routers import chat, resume, jobs, apply, network, interview, tracker, auto_apply
 from routers import auth as auth_router
-from routers import user_data, payments, referral, analytics, extension
+from routers import user_data, payments, referral, analytics, extension, company
 from db.database import init_db
 
 @asynccontextmanager
@@ -62,6 +62,7 @@ app.include_router(payments.router, prefix="/api/payments", tags=["Payments"])
 app.include_router(referral.router, prefix="/api/referral", tags=["Referral"])
 app.include_router(analytics.router, prefix="/api/analytics", tags=["Analytics"])
 app.include_router(extension.router, prefix="/api/extension", tags=["Browser Extension"])
+app.include_router(company.router, prefix="/api/company", tags=["Company Intelligence"])
 
 @app.get("/api/health")
 async def health():

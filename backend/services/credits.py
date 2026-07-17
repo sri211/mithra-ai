@@ -33,6 +33,7 @@ CREDIT_COSTS = {
     "pdf_download": 2,
     "job_search": 2,          # usually cache-hit = pure margin
     "chat_message": 1,
+    "company_intel": 2,   # only on a cache MISS; cached lookups are free
     "resume_score": 0,        # rule-based — always free
 }
 
