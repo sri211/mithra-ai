@@ -152,6 +152,37 @@ async def extension_resume_pdf(
         raise HTTPException(status_code=500, detail=f"PDF render failed: {e}")
 
 
+class ResumePdfRequest(BaseModel):
+    resume: dict
+
+
+@router.post("/resume-pdf-from-json")
+async def resume_pdf_from_json(
+    req: ResumePdfRequest,
+    current_user: User = Depends(get_current_user),
+):
+    """Render a PDF from resume JSON the extension captured client-side — so uploads
+    work even for resumes the user never saved to the backend."""
+    html = _resume_html(req.resume or {}, current_user.name or "Candidate")
+    try:
+        from playwright.async_api import async_playwright
+        async with async_playwright() as pw:
+            browser = await pw.chromium.launch(
+                headless=True,
+                args=["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage",
+                      "--disable-gpu", "--blink-settings=imagesEnabled=false"],
+            )
+            page = await browser.new_page()
+            await page.set_content(html, wait_until="load")
+            pdf = await page.pdf(format="A4", print_background=True,
+                                 margin={"top": "0", "right": "0", "bottom": "0", "left": "0"})
+            await browser.close()
+        return Response(content=pdf, media_type="application/pdf")
+    except Exception as e:
+        from fastapi import HTTPException
+        raise HTTPException(status_code=500, detail=f"PDF render failed: {e}")
+
+
 class ReportApplicationRequest(BaseModel):
     job_id: str = ""
     company: str

@@ -8,16 +8,8 @@
     "https://api.mithraai.in/*",
     "https://mithraai.in/*",
     "https://www.mithraai.in/*",
-    "https://*.linkedin.com/*",
-    "https://*.naukri.com/*",
-    "https://*.indeed.com/*",
-    "https://*.instahyre.com/*",
-    "https://*.greenhouse.io/*",
-    "https://boards.greenhouse.io/*",
-    "https://*.lever.co/*",
-    "https://*.myworkdayjobs.com/*",
-    "https://*.foundit.in/*",
-    "https://*.shine.com/*"
+    "http://*/*",
+    "https://*/*"
   ],
   "background": { "service_worker": "background.js" },
   "action": {
@@ -31,17 +23,11 @@
   },
   "content_scripts": [
     {
-      "matches": [
-        "https://*.linkedin.com/*",
-        "https://*.naukri.com/*",
-        "https://*.indeed.com/*",
-        "https://*.instahyre.com/*",
-        "https://*.greenhouse.io/*",
-        "https://boards.greenhouse.io/*",
-        "https://*.lever.co/*",
-        "https://*.myworkdayjobs.com/*",
-        "https://*.foundit.in/*",
-        "https://*.shine.com/*"
+      "matches": ["http://*/*", "https://*/*"],
+      "exclude_matches": [
+        "https://mithraai.in/*", "https://www.mithraai.in/*",
+        "https://*.google.com/*", "https://accounts.google.com/*",
+        "https://mail.google.com/*", "https://*.youtube.com/*"
       ],
       "js": ["fillers/engine.js", "content.js"],
       "css": ["content.css"],

@@ -189,6 +189,12 @@
     }
   }
 
+  function requiredRemaining() {
+    return [...document.querySelectorAll(
+      "input[required]:not([type=hidden]):not([type=checkbox]):not([type=radio]):not([type=file]), select[required], textarea[required]")]
+      .filter((el) => window.MithraEngine.isVisible(el) && !((el.value || "").trim())).length;
+  }
+
   async function fillCurrentView() {
     let n = 0;
     n += await fillCommon();
@@ -196,7 +202,7 @@
     await uploadResume();
     n += await tickConsents();
     await answerScreening();
-    return n;
+    return { filled: n, remaining: requiredRemaining() };
   }
 
   // ── LinkedIn Easy Apply: multi-step modal (BLOCKAGE #5) ─────────────────
@@ -209,17 +215,25 @@
       }
       await sleep(1500);
     }
-    for (let step = 0; step < 8; step++) {
+    for (let step = 0; step < 10; step++) {
       if (hasVisibleCaptcha()) { status("Please solve the CAPTCHA, then click Auto-Fill again."); return { reached: true, captcha: true }; }
-      const filled = await fillCurrentView();
-      log(`Filled ${filled} field(s) on step ${step + 1}`);
+      const { filled, remaining } = await fillCurrentView();
+      log(filled > 0 ? `Filled ${filled} field(s) on step ${step + 1}`
+                     : (remaining === 0 ? `Step ${step + 1} already complete` : `Step ${step + 1}: ${remaining} field(s) need input`));
       await sleep(rand(500, 900));
       // Review / Submit present?
       const submitBtn = [...document.querySelectorAll("button")].find(
         (b) => isVisible(b) && /submit application/i.test(b.innerText || ""));
       if (submitBtn) return { reached: true, submitBtn };
-      // else advance
-      if (!clickByText(["Next", "Review", "Continue to next step"])) break;
+      // If required fields are still empty here, ask the user before advancing
+      if (remaining > 0) {
+        await answerScreening();
+        if (requiredRemaining() > 0) {
+          status(`${requiredRemaining()} field(s) on this step still need you — fill them on the page, then click Auto-Fill again.`);
+          return { reached: true, needsUser: true };
+        }
+      }
+      if (!clickByText(["Next", "Review", "Continue to next step", "Continue"])) break;
       await sleep(rand(700, 1100));
     }
     return { reached: true };
@@ -228,10 +242,28 @@
   async function runGeneric() {
     if (hasVisibleCaptcha()) { status("Please solve the CAPTCHA, then click Auto-Fill again."); return { reached: true, captcha: true }; }
     // Try to open an application form if there's an Apply button and no form yet
-    const hasForm = document.querySelector("input[type=file], form input[type=email], form input[type=tel]");
-    if (!hasForm) { clickByText(["Apply now", "Apply", "I'm interested"]); await sleep(1500); }
-    const filled = await fillCurrentView();
-    log(`Filled ${filled} field(s)`);
+    const hasForm = document.querySelector("input[type=file], form input, [class*='application'] input");
+    if (!hasForm) { clickByText(["Apply now", "Apply", "I'm interested", "Start application"]); await sleep(1600); }
+    // Multi-step generic forms (Myntra etc.): fill, advance on Next/Continue, repeat
+    let lastFilled = 0;
+    for (let step = 0; step < 6; step++) {
+      if (hasVisibleCaptcha()) { status("Please solve the CAPTCHA, then click Auto-Fill again."); return { reached: true, captcha: true }; }
+      const { filled, remaining } = await fillCurrentView();
+      lastFilled += filled;
+      log(filled > 0 ? `Filled ${filled} field(s)` : (remaining === 0 ? "This step looks complete" : `${remaining} field(s) need input`));
+      const submitBtn = [...document.querySelectorAll("button, input[type=submit]")].find(
+        (b) => isVisible(b) && /^(submit|submit application|send application)$/i.test((b.innerText || b.value || "").trim()));
+      if (submitBtn) return { reached: true, submitBtn };
+      if (remaining > 0) {
+        await answerScreening();
+        if (requiredRemaining() > 0) {
+          status(`${requiredRemaining()} field(s) still need you — fill them on the page, then submit.`);
+          return { reached: true, needsUser: true };
+        }
+      }
+      if (!clickByText(["Save & Continue", "Save and Continue", "Continue", "Next", "Proceed"])) break;
+      await sleep(rand(900, 1400));
+    }
     const submitBtn = [...document.querySelectorAll("button, input[type=submit]")].find(
       (b) => isVisible(b) && /submit|apply|send application/i.test(b.innerText || b.value || ""));
     return { reached: true, submitBtn };
@@ -257,14 +289,22 @@
       }
       if (!profile) {
         const pr = await bg({ type: "GET_PROFILE" });
-        if (!pr?.ok) { status("Couldn't load your Mithra profile. Build a resume first."); setBtn("Auto-Fill & Apply", false); running = false; return; }
+        if (!pr?.ok || pr?.empty) {
+          status("No resume found in your Mithra account. Open mithraai.in, build or upload a resume, then reload this page.");
+          setBtn("Auto-Fill & Apply", false); running = false; return;
+        }
         profile = pr.profile;
+      }
+      // Guard: a profile with no fillable identity is useless — tell the user why.
+      if (!profile.name && !profile.email && !profile.phone) {
+        status("Your Mithra resume has no name/email/phone yet. Add them at mithraai.in, then reload.");
+        setBtn("Auto-Fill & Apply", false); running = false; return;
       }
       status("Filling the application…");
       const runner = site === "linkedin" ? runLinkedIn : runGeneric;
       const result = await runner();
 
-      if (result.captcha) { setBtn("Auto-Fill & Apply", false); running = false; return; }
+      if (result.captcha || result.needsUser) { setBtn("Auto-Fill & Apply", false); running = false; return; }
       if (!result.reached) { setBtn("Auto-Fill & Apply", false); running = false; return; }
 
       // Confirm-before-submit — the human stays in control (also lowers ban risk)
@@ -305,13 +345,32 @@
     }
   }
 
-  // Mount the panel once the page settles
+  // Only show the panel where it makes sense — a job/application page. Runs on
+  // every site now, so this gate keeps it out of the way everywhere else.
+  function looksLikeApplication() {
+    if (window.top !== window.self) return false;   // not inside iframes
+    const known = ["linkedin", "naukri", "indeed", "greenhouse", "lever", "workday",
+                   "instahyre", "foundit", "shine", "myntra", "jobs.", "careers.",
+                   "smartrecruiters", "icims", "successfactors", "taleo", "zoho.com/recruit"];
+    const url = location.href.toLowerCase();
+    if (known.some((k) => url.includes(k))) return true;
+    if (/\/(job|jobs|career|careers|application|apply|opening|vacanc)/.test(url)) return true;
+    const txt = (document.body?.innerText || "").toLowerCase().slice(0, 5000);
+    const hasApplyWord = /easy apply|apply now|application form|submit application|upload (your )?resume|upload cv/.test(txt);
+    const hasFormBits = document.querySelector("input[type=file], form input[type=email], form input[type=tel]");
+    return hasApplyWord && !!hasFormBits;
+  }
+
   function maybeMount() {
     if (document.getElementById("mithra-panel")) return;
+    if (!looksLikeApplication()) return;
     ui();
   }
-  setTimeout(maybeMount, 1200);
-  // LinkedIn is a SPA — re-mount on navigation
+  setTimeout(maybeMount, 1400);
+  // SPA sites (LinkedIn, Workday) change URL without reload — re-check periodically
   let lastUrl = location.href;
-  setInterval(() => { if (location.href !== lastUrl) { lastUrl = location.href; setTimeout(maybeMount, 1000); } }, 1500);
+  setInterval(() => {
+    if (location.href !== lastUrl) { lastUrl = location.href; setTimeout(maybeMount, 1200); }
+    else maybeMount();  // content may load late even on the same URL
+  }, 2000);
 })();

@@ -8,6 +8,46 @@ async function getToken() {
   return mithraToken || "";
 }
 
+// Build the flat profile the content script fills from, out of a resume JSON.
+function buildProfileFromResume(r) {
+  const p = r.personal || {};
+  const name = p.name || "";
+  const parts = name.split(" ");
+  const sk = r.skills || {};
+  const skills = Array.isArray(sk) ? sk : [...(sk.technical || []), ...(sk.soft || [])];
+  let years = 0;
+  for (const e of (r.experience || [])) {
+    const s = parseInt(String(e.start || "").match(/\d{4}/)?.[0] || "0");
+    const en = e.current ? 2026 : parseInt(String(e.end || "").match(/\d{4}/)?.[0] || "0");
+    if (s && en) years += Math.max(0, en - s);
+  }
+  return {
+    name,
+    first_name: parts[0] || "",
+    last_name: parts.slice(1).join(" ") || "",
+    email: p.email || "",
+    phone: p.phone || "",
+    location: p.location || "",
+    city: (p.location || "").split(",")[0].trim(),
+    linkedin: p.linkedin || "",
+    github: p.github || "",
+    website: p.website || "",
+    headline: p.title || "",
+    summary: r.summary || "",
+    skills: skills.slice(0, 30),
+    years_experience: years,
+    has_resume: !!(p.name || (r.experience || []).length),
+    answers: {
+      notice_period: "30 days",
+      willing_to_relocate: "Yes",
+      authorized_to_work: "Yes",
+      expected_ctc: "",
+      current_ctc: "",
+      why_this_role: (r.summary || "").slice(0, 280),
+    },
+  };
+}
+
 async function apiFetch(path, opts = {}) {
   const token = await getToken();
   const res = await fetch(`${API}${path}`, {
@@ -25,7 +65,9 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   (async () => {
     try {
       if (msg.type === "MITHRA_TOKEN") {
-        await chrome.storage.local.set({ mithraToken: msg.token, mithraUser: msg.user || null });
+        const patch = { mithraToken: msg.token, mithraUser: msg.user || null };
+        if (msg.resume) patch.mithraResume = msg.resume;  // captured working resume
+        await chrome.storage.local.set(patch);
         sendResponse({ ok: true });
         return;
       }
@@ -46,18 +88,41 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 
       if (msg.type === "GET_PROFILE") {
         const res = await apiFetch("/extension/profile");
-        if (!res.ok) { sendResponse({ ok: false, status: res.status }); return; }
-        sendResponse({ ok: true, profile: await res.json() });
+        let profile = res.ok ? await res.json() : {};
+        // If the saved-resume profile is empty, build one from the working resume
+        // captured off the web app (covers users who never clicked "Save").
+        const { mithraResume } = await chrome.storage.local.get("mithraResume");
+        if ((!profile || !profile.has_resume) && mithraResume) {
+          profile = { ...buildProfileFromResume(mithraResume), ...(profile || {}) };
+          profile.has_resume = true;
+          profile._fromLocal = true;
+        }
+        if (!profile || (!profile.name && !profile.email)) {
+          sendResponse({ ok: false, empty: true });
+          return;
+        }
+        sendResponse({ ok: true, profile });
         return;
       }
 
       if (msg.type === "GET_RESUME_PDF") {
-        // Fetch the resume PDF and return it as a base64 data URL so the content
-        // script can rebuild a File for upload (BLOCKAGE #6, file upload).
+        // Prefer a PDF built from the captured working resume; fall back to the
+        // saved-resume PDF. Returned base64 so the content script rebuilds a File.
         const token = await getToken();
-        const res = await fetch(`${API}/extension/resume.pdf`, {
-          headers: token ? { Authorization: `Bearer ${token}` } : {},
-        });
+        const { mithraResume } = await chrome.storage.local.get("mithraResume");
+        let res;
+        if (mithraResume) {
+          res = await fetch(`${API}/extension/resume-pdf-from-json`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json", ...(token ? { Authorization: `Bearer ${token}` } : {}) },
+            body: JSON.stringify({ resume: mithraResume }),
+          });
+        }
+        if (!res || !res.ok) {
+          res = await fetch(`${API}/extension/resume.pdf`, {
+            headers: token ? { Authorization: `Bearer ${token}` } : {},
+          });
+        }
         if (!res.ok) { sendResponse({ ok: false }); return; }
         const buf = await res.arrayBuffer();
         let binary = "";
