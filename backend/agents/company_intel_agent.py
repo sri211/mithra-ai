@@ -256,18 +256,27 @@ async def suggest_companies(q: str) -> list[dict]:
         return cached
     out = []
     try:
-        async with httpx.AsyncClient() as client:
+        async with httpx.AsyncClient(follow_redirects=True) as client:
+            # opensearch is Wikipedia's prefix/typeahead endpoint — far better for
+            # partial words than full-text search ("flipk" → "Flipkart").
             r = await client.get(WIKI_API, params={
-                "action": "query", "list": "search", "srsearch": f"{q} company",
-                "format": "json", "srlimit": 6,
+                "action": "opensearch", "search": q, "limit": 8,
+                "namespace": 0, "format": "json",
             }, headers=UA, timeout=8)
-            for h in r.json().get("query", {}).get("search", []):
-                title = h["title"]
+            data = r.json()
+            titles = data[1] if len(data) > 1 else []
+            descs = data[2] if len(data) > 2 else []
+            for i, title in enumerate(titles):
+                hint = (descs[i] if i < len(descs) else "")[:90]
+                # Skip obvious non-company pages
+                if any(w in title.lower() for w in ("list of", "category:", "disambiguation")):
+                    continue
                 out.append({
                     "name": title,
                     "logo": f"https://logo.clearbit.com/{_domain_for(title, '')}",
-                    "hint": re.sub(r"<[^>]+>", "", h.get("snippet", ""))[:90],
+                    "hint": re.sub(r"<[^>]+>", "", hint),
                 })
+            out = out[:6]
     except Exception:
         pass
     if out:
