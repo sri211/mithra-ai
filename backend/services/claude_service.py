@@ -62,7 +62,11 @@ async def complete_claude(
         system=_cached_system(system),
         messages=messages,
     )
-    return response.content[0].text
+    # Guard against an empty/blocked response so callers never get None.
+    if not response.content:
+        return ""
+    first = response.content[0]
+    return getattr(first, "text", "") or ""
 
 
 async def complete_claude_json(
@@ -86,6 +90,8 @@ def _extract_json(text: str) -> str:
     into a single dict — which callers then read as "empty".
     """
     import re
+    if not text:
+        return ""
     # Remove ```json ... ``` or ``` ... ``` wrappers
     text = re.sub(r"^```(?:json)?\s*", "", text.strip(), flags=re.MULTILINE)
     text = re.sub(r"\s*```$", "", text.strip(), flags=re.MULTILINE)

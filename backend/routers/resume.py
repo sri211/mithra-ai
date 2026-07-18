@@ -122,9 +122,23 @@ async def enhance_bullet_route(req: BulletRequest):
 @router.post("/adapt", dependencies=[Depends(charge_action("resume_adapt"))])
 async def adapt_resume_route(req: AdaptRequest):
     try:
-        jd_parsed = await parse_job_description(req.jd_text)
-        result = await adapt_resume(req.resume, req.jd_text, jd_parsed, company_name=req.company_name, role_name=req.role_name)
+        jd_text = (req.jd_text or "").strip()
+        # "Company + Role" mode sends no JD — synthesize one from company+role so
+        # the adaptor has real requirements to tailor against.
+        if not jd_text and (req.company_name or req.role_name):
+            from agents.resume_adaptor_agent import generate_jd_from_role
+            jd_text = await generate_jd_from_role(req.company_name, req.role_name)
+
+        if not jd_text:
+            raise HTTPException(status_code=400,
+                detail="Paste a job description, a job URL, or a company + role to adapt against.")
+
+        jd_parsed = await parse_job_description(jd_text)
+        result = await adapt_resume(req.resume, jd_text, jd_parsed,
+                                    company_name=req.company_name, role_name=req.role_name)
         return result
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 

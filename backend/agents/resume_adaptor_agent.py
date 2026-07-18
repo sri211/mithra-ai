@@ -82,14 +82,46 @@ SYSTEM_JD_PARSER = """Extract the following from this job description as JSON:
 
 async def parse_job_description(jd_text: str) -> dict:
     from services.ai_cache import cache_get, cache_set
+    jd_text = (jd_text or "").strip()
+    if not jd_text:
+        # Never call the model with empty content (Anthropic 400s on that).
+        return {"title": "", "required_skills": [], "responsibilities": [], "keywords": []}
     cached = await cache_get("jd_analysis", jd_text[:2000])
     if cached and isinstance(cached, dict):
         return cached
     messages = [{"role": "user", "content": jd_text}]
     raw = await complete_claude_json(SYSTEM_JD_PARSER, messages)
-    parsed = json.loads(raw)
+    try:
+        parsed = json.loads(raw)
+    except (json.JSONDecodeError, TypeError):
+        parsed = {"title": "", "required_skills": [], "responsibilities": [], "keywords": []}
     await cache_set("jd_analysis", parsed, 24 * 7, jd_text[:2000])
     return parsed
+
+
+async def generate_jd_from_role(company: str, role: str) -> str:
+    """Synthesize a realistic job description from a company + role, so the adaptor
+    works in 'Company + Role' mode. Cached 30 days per company+role — near-zero cost."""
+    from services.ai_cache import cache_get, cache_set
+    company = (company or "").strip()
+    role = (role or "").strip()
+    key = f"{company}|{role}"
+    cached = await cache_get("jd_from_role", key)
+    if cached and isinstance(cached, str) and cached.strip():
+        return cached
+
+    system = (
+        "You write realistic, specific job descriptions for the Indian market. "
+        "Given a company and a role, produce a JD with: a one-line summary, "
+        "Key Responsibilities (5-7 bullets), Required Skills & Qualifications (6-8 bullets), "
+        "and Preferred Skills (3-4 bullets). Be concrete and role-accurate. Plain text, no preamble."
+    )
+    prompt = f"Company: {company or 'a leading company'}\nRole: {role or 'the role'}\n\nWrite the job description."
+    jd = await complete_claude(system, [{"role": "user", "content": prompt}], max_tokens=900)
+    jd = (jd or "").strip()
+    if jd:
+        await cache_set("jd_from_role", jd, 24 * 30, key)
+    return jd
 
 
 async def get_company_intelligence(company: str, role: str) -> str:
