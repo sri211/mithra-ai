@@ -536,6 +536,49 @@ async def _fetch_jd_with_playwright(url: str) -> tuple[str, str]:
         return "", ""
 
 
+async def _fetch_linkedin_job(url: str) -> tuple[str, str]:
+    """LinkedIn job pages hide the JD from logged-out scrapers, but the public
+    'jobs-guest' embed API returns clean job text. Use that instead of the noisy
+    full page (which only yields the recruiter sidebar)."""
+    import re as _re
+    m = (_re.search(r"/jobs/view/(\d+)", url)
+         or _re.search(r"currentJobId=(\d+)", url)
+         or _re.search(r"/jobs/(?:view/)?(\d{6,})", url))
+    if not m:
+        return "", ""
+    job_id = m.group(1)
+    guest = f"https://www.linkedin.com/jobs-guest/jobs/api/jobPosting/{job_id}"
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                      "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+        "Accept-Language": "en-US,en;q=0.9",
+    }
+    try:
+        from bs4 import BeautifulSoup
+        async with httpx.AsyncClient(timeout=15, follow_redirects=True) as client:
+            r = await client.get(guest, headers=headers)
+            if r.status_code != 200:
+                return "", ""
+            soup = BeautifulSoup(r.text, "html.parser")
+            title_el = soup.select_one(".top-card-layout__title, .topcard__title, h2")
+            company_el = soup.select_one(".topcard__org-name-link, .topcard__flavor, a.topcard__org-name-link")
+            loc_el = soup.select_one(".topcard__flavor--bullet, .job-details-jobs-unified-top-card__bullet")
+            desc_el = soup.select_one(".show-more-less-html__markup, .description__text, .decorated-job-posting__details")
+            title = title_el.get_text(strip=True) if title_el else "LinkedIn Job"
+            company = company_el.get_text(strip=True) if company_el else ""
+            location = loc_el.get_text(strip=True) if loc_el else ""
+            desc = desc_el.get_text(separator="\n", strip=True) if desc_el else ""
+            parts = []
+            if title: parts.append(f"Role: {title}")
+            if company: parts.append(f"Company: {company}")
+            if location: parts.append(f"Location: {location}")
+            if desc: parts.append(f"\n{desc}")
+            text = "\n".join(parts).strip()
+            return text, title
+    except Exception:
+        return "", ""
+
+
 @router.post("/fetch-jd")
 async def fetch_jd_route(req: FetchJDRequest):
     """Fetch a job description or LinkedIn profile from a URL.
@@ -554,6 +597,13 @@ async def fetch_jd_route(req: FetchJDRequest):
         if text and len(text) > 50:
             return {"text": text, "title": "LinkedIn Profile", "source": "linkedin_scraper"}
         raise HTTPException(status_code=422, detail="Could not extract profile data from LinkedIn. Please paste your profile content manually.")
+
+    # LinkedIn JOB URLs → clean guest embed API (full page only gives recruiter chrome)
+    if "linkedin.com" in url and ("/jobs/view/" in url or "currentJobId=" in url):
+        li_text, li_title = await _fetch_linkedin_job(url)
+        if li_text and len(li_text.replace("\n", "").replace(" ", "")) > 60:
+            return {"text": li_text, "title": li_title, "source": "linkedin_jobs_guest"}
+        # else fall through to the generic path below
 
     headers = {
         "User-Agent": (
