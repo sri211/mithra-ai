@@ -604,8 +604,38 @@ async def fetch_jd_route(req: FetchJDRequest):
             title = pw_title or title
             used_playwright = True
 
-    if not text:
-        raise HTTPException(status_code=422, detail="Could not extract job description from this URL. The page may require login or is heavily JS-rendered. Please paste the job description text manually.")
+    # ── Quality gate: refuse to return boilerplate/garbage as a "JD" ─────────
+    def _looks_unusable(t: str) -> bool:
+        if not t:
+            return True
+        compact = t.replace("\n", "").replace(" ", "")
+        if len(compact) < 220:
+            return True
+        low = t.lower()
+        # Meta boilerplate only
+        if "apply now for job and take the next step" in low and len(compact) < 400:
+            return True
+        # A "related jobs" list rather than one JD (many repeated "Job ID" rows)
+        if low.count("job id") >= 3 and "responsibilit" not in low and "qualif" not in low and "requirement" not in low:
+            return True
+        return False
+
+    # Canvas-app career portals (Flutter/CanvasKit) render text as pixels — the
+    # DOM has nothing to read. Detect and tell the user honestly.
+    canvas_app = False
+    if used_playwright and _looks_unusable(text):
+        canvas_app = True
+
+    if _looks_unusable(text):
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "This careers page hides its text from automated readers"
+                + (" (it's a canvas-based app like Myntra's)" if canvas_app else "")
+                + ". Copy-paste the job description into 'Paste JD', or use "
+                "'Company + Role' mode and I'll build the JD from the role."
+            ),
+        )
 
     return {"text": text, "title": title, "used_playwright": used_playwright}
 
