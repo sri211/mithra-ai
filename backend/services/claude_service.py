@@ -62,11 +62,14 @@ async def complete_claude(
         system=_cached_system(system),
         messages=messages,
     )
-    # Guard against an empty/blocked response so callers never get None.
+    # Concatenate ALL text blocks. The response may lead with a thinking block
+    # (content[0] has no `.text`), so reading only content[0] would drop the
+    # actual answer — this silently broke the resume adaptor.
     if not response.content:
         return ""
-    first = response.content[0]
-    return getattr(first, "text", "") or ""
+    parts = [getattr(b, "text", "") for b in response.content
+             if getattr(b, "type", None) == "text" or hasattr(b, "text")]
+    return "".join(p for p in parts if p)
 
 
 async def complete_claude_json(
