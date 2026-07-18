@@ -391,35 +391,28 @@ def _extract_jd_text_from_html(html: str) -> tuple[str, str]:
         except Exception:
             pass
 
-    # ── 2. Meta description ───────────────────────────────────────────────────
+    # Capture meta description but DON'T add it yet — it's boilerplate ("Apply now
+    # for job…") and must only be used as a last resort, never as the main content.
+    meta_summary = ""
     og_desc = soup.find("meta", property="og:description")
     if og_desc and og_desc.get("content"):
-        parts.append(f"Summary: {og_desc['content']}")
-    meta_desc = soup.find("meta", attrs={"name": "description"})
-    if meta_desc and meta_desc.get("content"):
-        parts.append(f"Meta: {meta_desc['content']}")
+        meta_summary = og_desc["content"]
+    if not meta_summary:
+        meta_desc = soup.find("meta", attrs={"name": "description"})
+        if meta_desc and meta_desc.get("content"):
+            meta_summary = meta_desc["content"]
 
-    # ── 3. Visible content from job-specific selectors ───────────────────────
-    # Remove boilerplate before extracting text
+    # ── 2. Real visible content ───────────────────────────────────────────────
     for tag in soup(["script", "style", "nav", "footer", "header", "noscript", "aside", "meta", "link"]):
         tag.decompose()
 
     main_content = None
     for selector in [
-        "[class*='job-description']",
-        "[class*='jobDescription']",
-        "[class*='job_description']",
-        "[id*='job-description']",
-        "[id*='jobDescription']",
-        "[class*='description__text']",
-        "[class*='show-more-less-html']",
-        "[class*='jobDetail']",
-        "[class*='job-detail']",
-        "[class*='posting']",
-        "article",
-        "main",
-        "[role='main']",
-        "section",
+        "[class*='job-description']", "[class*='jobDescription']", "[class*='job_description']",
+        "[id*='job-description']", "[id*='jobDescription']", "[class*='description__text']",
+        "[class*='show-more-less-html']", "[class*='jobDetail']", "[class*='job-detail']",
+        "[class*='jd-']", "[class*='JobDetail']", "[class*='posting']", "[data-testid*='job']",
+        "article", "main", "[role='main']",
     ]:
         found = soup.select_one(selector)
         if found:
@@ -430,10 +423,33 @@ def _extract_jd_text_from_html(html: str) -> tuple[str, str]:
 
     if main_content:
         parts.append(main_content.get_text(separator="\n", strip=True))
-    elif not parts:
-        body = soup.find("body")
-        if body:
-            parts.append(body.get_text(separator="\n", strip=True))
+    else:
+        # No known container matched (custom SPAs like Myntra) — pick the DOM
+        # element with the most text and a low link-density (i.e. real prose).
+        best_txt, best_score = "", 0
+        for el in soup.find_all(["div", "section", "article"]):
+            txt = el.get_text(separator="\n", strip=True)
+            if len(txt) < 300:
+                continue
+            links = el.find_all("a")
+            link_chars = sum(len(a.get_text(strip=True)) for a in links)
+            density = link_chars / max(len(txt), 1)
+            if density > 0.4:      # mostly navigation/link lists — skip
+                continue
+            score = len(txt) * (1 - density)
+            if score > best_score:
+                best_score, best_txt = score, txt
+        if best_txt:
+            parts.append(best_txt)
+        elif not parts:
+            body = soup.find("body")
+            if body:
+                parts.append(body.get_text(separator="\n", strip=True))
+
+    # Meta only if we still have almost nothing real
+    real_len = sum(len(p) for p in parts)
+    if meta_summary and real_len < 300:
+        parts.append(f"Summary: {meta_summary}")
 
     raw_text = "\n\n".join(parts)
 
@@ -487,10 +503,29 @@ async def _fetch_jd_with_playwright(url: str) -> tuple[str, str]:
             page = await context.new_page()
             try:
                 await page.goto(url, wait_until="domcontentloaded", timeout=25000)
-                await page.wait_for_timeout(3000)
+                # Wait for the SPA to actually paint its content, not just the shell.
+                try:
+                    await page.wait_for_load_state("networkidle", timeout=12000)
+                except Exception:
+                    pass
+                # Poll until the body has real content (SPAs hydrate late).
+                for _ in range(8):
+                    body_len = await page.evaluate("() => (document.body?.innerText || '').length")
+                    if body_len and body_len > 800:
+                        break
+                    await page.wait_for_timeout(1000)
+                # Scroll to trigger any lazy-loaded description sections.
+                try:
+                    await page.evaluate("() => window.scrollTo(0, document.body.scrollHeight)")
+                    await page.wait_for_timeout(1200)
+                except Exception:
+                    pass
                 html = await page.content()
             except Exception:
-                html = await page.content()
+                try:
+                    html = await page.content()
+                except Exception:
+                    html = ""
             await browser.close()
             return _extract_jd_text_from_html(html)
     except ImportError:
