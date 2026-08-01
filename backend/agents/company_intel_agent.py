@@ -93,11 +93,18 @@ async def _wiki_search(client: httpx.AsyncClient, name: str) -> Optional[str]:
             "format": "json", "srlimit": 6,
         }, headers=UA, timeout=10)
         hits = r.json().get("query", {}).get("search", [])
-        if not hits:
-            return None
         low0 = name.lower().split()[0]
-        # Only consider titles that actually contain the searched name
-        candidates = [h["title"] for h in hits if low0 in h["title"].lower()][:5] or [hits[0]["title"]]
+        # Only consider titles that actually contain the searched name. If none do,
+        # don't fall back to an unrelated top hit (that surfaced "E-commerce in India"
+        # for "Udaan") — return None so the dossier stays thin rather than wrong.
+        titles = [h["title"] for h in (hits or [])]
+        candidates = [t for t in titles if low0 in t.lower()][:5]
+        # Always try the explicit "(company)" disambiguation page too.
+        for guess in (f"{name} (company)", f"{name} (business)"):
+            if guess not in candidates:
+                candidates.append(guess)
+        if not candidates:
+            return None
 
         scored = await asyncio.gather(*[_score_candidate(client, t) for t in candidates])
         best_title, best_score, best_d = None, -999, {}
@@ -107,8 +114,10 @@ async def _wiki_search(client: httpx.AsyncClient, name: str) -> Optional[str]:
                 sc += 4
             if sc > best_score:
                 best_title, best_score, best_d = title, sc, d
-        # If nothing scored as a company, we still return the best title but the
-        # caller's confidence will reflect the weak match.
+        # A clearly non-company best match (e.g. only a film exists) → return None
+        # so we don't present a movie as a company.
+        if best_score < 0:
+            return None
         return best_title
     except Exception:
         return None
