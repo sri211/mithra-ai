@@ -29,22 +29,87 @@ UA = {"User-Agent": "MithraAI/1.0 (career platform; contact@mithraai.in)"}
 
 # ── Free layer: Wikipedia + Wikidata ─────────────────────────────────────────
 
+_NON_COMPANY = ("film", "movie", "song", "album", "tv series", "television series",
+                "actor", "actress", "singer", "musician", "novel", "book ", "drama",
+                "directed by", "screenplay", "soundtrack", " born ", "footballer",
+                "cricketer", "politician", "village", "town", "given name", "surname",
+                "episode", "sitcom", "web series", "short film", "documentary")
+_COMPANY = ("company", "corporation", "e-commerce", "ecommerce", "startup", "start-up",
+            "firm", "enterprise", "founded", "headquarter", "technology", "platform",
+            "marketplace", "retailer", "private limited", "pvt", "ltd", "inc.", "bank",
+            "manufacturer", "conglomerate", "multinational", "subsidiary", "brand",
+            "fintech", "saas", "unicorn", "b2b", "b2c", "logistics", "services company")
+
+
+async def _score_candidate(client: httpx.AsyncClient, title: str) -> tuple[int, dict]:
+    """Fetch a candidate's summary and score how company-like it is.
+    Higher = more likely the actual company. Negative = clearly not a company."""
+    try:
+        r = await client.get(WIKI_REST + title.replace(" ", "_"), headers=UA, timeout=10)
+        d = r.json()
+        desc = (d.get("description") or "").lower()
+        extract = (d.get("extract") or "").lower()[:400]
+        blob = f"{desc} {extract}"
+        score = 0
+        for kw in _NON_COMPANY:
+            if kw in blob:
+                score -= 5
+        for kw in _COMPANY:
+            if kw in blob:
+                score += 3
+        # Wikidata instance-of check is the strongest signal
+        qid = d.get("wikibase_item") or ""
+        if qid:
+            try:
+                rr = await client.get(f"https://www.wikidata.org/wiki/Special:EntityData/{qid}.json",
+                                      headers=UA, timeout=8)
+                claims = rr.json().get("entities", {}).get(qid, {}).get("claims", {})
+                p31 = claims.get("P31", [])
+                inst_ids = {c.get("mainsnak", {}).get("datavalue", {}).get("value", {}).get("id")
+                            for c in p31 if isinstance(c.get("mainsnak", {}).get("datavalue", {}).get("value"), dict)}
+                # business (Q4830453), enterprise (Q6881511), company/organization types
+                COMPANY_QIDS = {"Q4830453", "Q6881511", "Q783794", "Q891723", "Q167037",
+                                "Q18388277", "Q19832486", "Q3918409", "Q22687"}
+                NONCOMPANY_QIDS = {"Q11424", "Q5398426", "Q7889", "Q482994", "Q571", "Q5"}  # film, tv, video game, album, book, human
+                if inst_ids & COMPANY_QIDS:
+                    score += 20
+                if inst_ids & NONCOMPANY_QIDS:
+                    score -= 20
+            except Exception:
+                pass
+        return score, d
+    except Exception:
+        return -100, {}
+
+
 async def _wiki_search(client: httpx.AsyncClient, name: str) -> Optional[str]:
-    """Return the best-matching Wikipedia page title for a company name."""
+    """Return the Wikipedia title of the actual COMPANY named `name` — verified via
+    Wikidata instance-of + description, so 'Udaan' resolves to the e-commerce firm
+    rather than the 2010 film."""
     try:
         r = await client.get(WIKI_API, params={
-            "action": "query", "list": "search", "srsearch": f"{name} company",
-            "format": "json", "srlimit": 3,
+            "action": "query", "list": "search",
+            "srsearch": f"{name} company OR startup OR business OR e-commerce",
+            "format": "json", "srlimit": 6,
         }, headers=UA, timeout=10)
         hits = r.json().get("query", {}).get("search", [])
         if not hits:
             return None
-        # Prefer a title that actually contains the company name
-        low = name.lower()
-        for h in hits:
-            if low.split()[0] in h["title"].lower():
-                return h["title"]
-        return hits[0]["title"]
+        low0 = name.lower().split()[0]
+        # Only consider titles that actually contain the searched name
+        candidates = [h["title"] for h in hits if low0 in h["title"].lower()][:5] or [hits[0]["title"]]
+
+        scored = await asyncio.gather(*[_score_candidate(client, t) for t in candidates])
+        best_title, best_score, best_d = None, -999, {}
+        for title, (sc, d) in zip(candidates, scored):
+            # Exact-name match gets a nudge so "Udaan" beats "Udaan Foundation" etc.
+            if title.lower() == name.lower():
+                sc += 4
+            if sc > best_score:
+                best_title, best_score, best_d = title, sc, d
+        # If nothing scored as a company, we still return the best title but the
+        # caller's confidence will reflect the weak match.
+        return best_title
     except Exception:
         return None
 
