@@ -158,6 +158,35 @@ class CreditLedger(Base):
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), index=True)
 
 
+class ChatKBEntry(Base):
+    """Admin-added / feedback-learned chatbot answers. Merged on top of the seed KB."""
+    __tablename__ = "chat_kb_entries"
+
+    id = Column(String, primary_key=True)
+    triggers = Column(JSON, nullable=False)       # list[str] of example questions
+    answer = Column(Text, nullable=False)
+    category = Column(String, default="learned")
+    tags = Column(JSON, nullable=True)            # list[str]
+    boost = Column(Float, default=0.0)            # positive-feedback boost
+    enabled = Column(Integer, default=1)
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+
+
+class ChatFeedback(Base):
+    """Every 👍/👎 on a chatbot reply — the raw signal the bot learns from."""
+    __tablename__ = "chat_feedback"
+
+    id = Column(String, primary_key=True)
+    user_id = Column(String, nullable=True, index=True)
+    query = Column(Text, nullable=False)
+    entry_id = Column(String, nullable=True, index=True)   # which KB entry answered
+    answer = Column(Text, nullable=True)
+    helpful = Column(Integer, nullable=False)              # 1 = 👍, 0 = 👎
+    confidence = Column(Float, nullable=True)
+    resolved = Column(Integer, default=0)                  # admin marked handled
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), index=True)
+
+
 class AICache(Base):
     """Shared response cache — one Claude/JSearch call serves every user who asks the same thing."""
     __tablename__ = "ai_cache"
