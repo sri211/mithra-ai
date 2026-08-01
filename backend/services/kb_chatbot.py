@@ -168,6 +168,98 @@ GREETINGS = ("hi", "hello", "hey", "hii", "helo", "yo", "namaste", "hola")
 
 CONFIDENCE_THRESHOLD = 0.16   # below this we treat it as "not confident"
 
+# ── Orchestrator: turn chat commands into app actions (FREE, rule-based) ───────
+# Maps a spoken feature name → the route the frontend navigates to.
+_NAV_TARGETS = [
+    (("job finder", "job search", "find jobs", "search jobs", "jobs"), "job-finder", "Job Finder"),
+    (("resume builder", "build resume", "build my resume", "create resume", "make a resume"), "resume-builder", "Resume Builder"),
+    (("resume adaptor", "resume adapter", "adapt resume", "adapt my resume", "tailor resume", "tailor my resume"), "resume-adaptor", "Resume Adaptor"),
+    (("resume score", "ats score", "score my resume", "check my resume"), "resume-score", "Resume Score"),
+    (("company intel", "company intelligence", "research company", "research a company"), "company-intel", "Company Intel"),
+    (("auto apply", "auto-apply", "autoapply"), "job-application", "Auto Apply"),
+    (("interview prep", "mock interview", "practice interview", "interview practice"), "interview-prep", "Interview Prep"),
+    (("tracker", "application tracker", "my applications board"), "tracker", "Tracker"),
+    (("network", "networking"), "network", "Network"),
+    (("pricing", "upgrade", "plans", "buy credits", "top up"), "pricing", "Pricing"),
+    (("dashboard", "home", "overview"), "dashboard", "Dashboard"),
+]
+_OPEN_VERBS = ("open", "go to", "goto", "take me to", "show me", "show", "navigate", "launch",
+               "start", "run", "bring up", "pull up", "can you open", "please open")
+_INDIAN_CITIES = ("bangalore", "bengaluru", "hyderabad", "mumbai", "delhi", "pune", "chennai",
+                  "gurgaon", "gurugram", "noida", "kolkata", "ahmedabad", "remote")
+
+
+def _extract_location(m: str) -> str:
+    for city in _INDIAN_CITIES:
+        if city in m:
+            return "" if city == "remote" else city.title()
+    return ""
+
+
+def detect_action(message: str) -> Optional[dict]:
+    """Return {type, value, confirm} if the message is a COMMAND to run a feature.
+    None if it's just a question. Fully rule-based — zero cost."""
+    m = message.lower().strip()
+
+    has_verb = any(v in m for v in _OPEN_VERBS) or "for me" in m
+
+    # Question guard: "how does X work", "what is X", "tell me about X" are NOT commands
+    # (unless they contain an explicit open verb like "can you open").
+    QUESTION_STARTS = ("how ", "what ", "why ", "which ", "who ", "when ", "where ", "whats",
+                       "does ", "is ", "are ", "explain", "tell me about", "difference")
+    if not has_verb and (m.startswith(QUESTION_STARTS) or "how does" in m or "how do" in m
+                         or "what is" in m or "what are" in m):
+        return None
+
+    first = m.split()[0] if m.split() else ""
+    imperative = first in ("open", "go", "take", "show", "start", "run", "find", "search",
+                           "adapt", "build", "create", "make", "score", "check", "research",
+                           "prep", "launch")
+
+    # word-boundary search verbs so "finder"/"searching descriptions" don't false-trigger
+    search_cmd = bool(re.search(r"\b(find|search|look for|get me|apply to)\b", m)) and \
+                 bool(re.search(r"\b(job|jobs|role|roles|opening|openings|position|positions|vacancy|vacancies)\b", m))
+
+    # 1. Job search with parameters ("find SDE jobs in Bangalore", "find a role based on my resume")
+    if search_cmd:
+        loc = _extract_location(m)
+        q = re.sub(r"\b(find|search|look for|get me|apply to|me|a|an|some|good|best|jobs?|roles?|"
+                   r"opening|openings|position|positions|for|in|based|on|my|resume|please|can|you|"
+                   r"could|the|at|near|around|with)\b", " ", m)
+        q = " ".join(_extract_and_clean(q))
+        val = (q + (" " + loc if loc else "")).strip()
+        return {"type": "search_jobs", "value": val,
+                "confirm": f"Opening **Job Finder**{' for ' + loc if loc else ''} and matching roles to your resume… 🔍"}
+
+    # 2. Adapt resume ("adapt my resume to Google", "tailor my resume")
+    if ("adapt" in m or "tailor" in m) and "resume" in m:
+        return {"type": "navigate", "value": "resume-adaptor",
+                "confirm": "Opening **Resume Adaptor** — paste a JD, a job URL, or a company + role, and I'll tailor your resume. 🎯"}
+
+    # 3. Build resume
+    if any(k in m for k in ("build my resume", "build resume", "create a resume", "create resume",
+                            "make my resume", "make a resume")):
+        return {"type": "build_resume", "value": "",
+                "confirm": "Opening **Resume Builder** — build from scratch, a chat, or upload your existing one. 📄"}
+
+    # 4. Resume score
+    if ("score" in m or "ats" in m) and "resume" in m:
+        return {"type": "navigate", "value": "resume-score",
+                "confirm": "Opening **Resume Score** — a free 7-point ATS check of your resume. ✅"}
+
+    # 5. Generic "open / go to <feature>"
+    if has_verb or imperative:
+        for names, route, label in _NAV_TARGETS:
+            if any(n in m for n in names):
+                return {"type": "navigate", "value": route,
+                        "confirm": f"Opening **{label}** for you now… 🚀"}
+    return None
+
+
+def _extract_and_clean(text: str) -> list[str]:
+    return [t for t in re.findall(r"[a-zA-Z0-9+#]+", text.lower())
+            if t not in _STOP and len(t) > 1][:6]
+
 
 def answer(message: str, ctx: dict) -> dict:
     """Returns {answer, entry_id, confidence, matched}. ctx carries live user data."""
@@ -184,7 +276,13 @@ def answer(message: str, ctx: dict) -> dict:
                           "What are you working on?",
                 "entry_id": "greeting", "confidence": 1.0, "matched": True}
 
-    # 1. Live user-data questions win
+    # 1. Command? Run the feature (orchestrator) — free, rule-based.
+    act = detect_action(msg)
+    if act:
+        return {"answer": act["confirm"], "entry_id": "action", "confidence": 1.0,
+                "matched": True, "action": {"type": act["type"], "value": act["value"]}}
+
+    # 2. Live user-data questions
     live = _live_answer(msg, ctx)
     if live:
         return {"answer": live, "entry_id": "live", "confidence": 1.0, "matched": True}

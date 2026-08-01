@@ -113,8 +113,12 @@ async def chat_stream(
                 yield f"data: {json.dumps({'text': buf})}\n\n"
                 buf = ""
                 await asyncio.sleep(0.015)
-        # metadata for feedback UI (entry_id + confidence)
-        yield f"data: {json.dumps({'meta': {'entry_id': result['entry_id'], 'confidence': result['confidence'], 'matched': result['matched']}})}\n\n"
+        # metadata for feedback UI (entry_id + confidence) and any orchestrator action
+        meta = {"entry_id": result["entry_id"], "confidence": result["confidence"],
+                "matched": result["matched"]}
+        if result.get("action"):
+            meta["action"] = result["action"]
+        yield f"data: {json.dumps({'meta': meta})}\n\n"
         yield "data: [DONE]\n\n"
 
     return StreamingResponse(generate(), media_type="text/event-stream")
