@@ -1,7 +1,18 @@
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
 from sqlalchemy.orm import DeclarativeBase
 from urllib.parse import urlsplit, urlunsplit, parse_qsl, urlencode
+import ssl
 import os
+
+
+def _ssl_require_ctx():
+    """TLS WITHOUT CA verification — matches libpq `sslmode=require` (encrypt the
+    connection, don't verify the chain). Supabase/Neon poolers present certs that
+    don't chain to the container's default CA bundle, so full verify fails."""
+    ctx = ssl.create_default_context()
+    ctx.check_hostname = False
+    ctx.verify_mode = ssl.CERT_NONE
+    return ctx
 
 RAW_DATABASE_URL = os.getenv("DATABASE_URL", "sqlite+aiosqlite:///./mithra.db")
 
@@ -25,7 +36,7 @@ def _normalize_db_url(url: str):
         # drop libpq-only params asyncpg rejects; remember if SSL was requested
         q = [(k, v) for k, v in parse_qsl(parts.query) if k not in ("sslmode", "channel_binding")]
         url = urlunsplit((scheme, parts.netloc, parts.path, urlencode(q), parts.fragment))
-        connect_args["ssl"] = True  # managed Postgres (Neon/Supabase) requires TLS
+        connect_args["ssl"] = _ssl_require_ctx()  # managed Postgres requires TLS (require-level)
         # Supabase / pgbouncer poolers reuse backend connections, which collides
         # with asyncpg's server-side prepared statements ("prepared statement
         # __asyncpg_... already exists"). Disable statement caching for poolers.
