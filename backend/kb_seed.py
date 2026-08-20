@@ -29,10 +29,10 @@ KB_SEED = [
      "triggers": ["how do credits work", "what are credits", "credit cost", "how much does each feature cost",
                   "how many credits", "credit system", "what costs credits", "coins"],
      "answer": "Mithra runs on **credits** that refresh monthly:\n"
-               "• Free: 30/mo · Pro (₹198): 300/mo · Elite (₹498): 1,000/mo\n\n"
-               "Per-action cost: Resume Adapt **25** · AI Resume Build **15** · Interview Session **10** · "
-               "Auto-Apply **8** · Cover Letter **5** · Answer Feedback **3** · Job Search **2** · "
-               "PDF Download **2** · Chat **1** · **Resume Score is FREE**.\n\n"
+               "• Free: 30/mo · Pro (₹198): 300/mo · Elite (₹498): 800/mo\n\n"
+               "Per-action cost: Resume Adapt **25** · AI Resume Build **15** · Interview Session **15** · "
+               "Cover Letter **5** · Answer Feedback **3** · Job Search **2** · "
+               "PDF Download **2** · Chat **FREE** · **Resume Score is FREE**.\n\n"
                "Out of credits? Grab a top-up (₹99 = 120, ₹199 = 280) on [Pricing](/pricing)."},
 
     # ── Feature how-tos ───────────────────────────────────────────────────────
@@ -101,7 +101,7 @@ KB_SEED = [
      "tags": ["pricing", "upgrade", "plans"],
      "triggers": ["how to upgrade", "pricing", "plans", "how much is pro", "cost of elite", "subscription price"],
      "answer": "**Plans:** Free ₹0 (30 credits/mo) · **Pro ₹198** (300 credits/mo) · **Elite ₹498** "
-               "(1,000 credits/mo + Auto-Apply). One-time top-ups: ₹99 = 120 credits, ₹199 = 280. "
+               "(800 credits/mo + Company Intelligence). One-time top-ups: ₹99 = 120 credits, ₹199 = 280. "
                "See [Pricing](/pricing)."},
 
     # ── Indian salaries by role ───────────────────────────────────────────────

@@ -39,6 +39,17 @@ async def get_current_user(
     return user
 
 
+# Owner/admin accounts — features gated to admin only (Auto Apply, Tracker).
+ADMIN_EMAILS = {"srinathreddy.ksr@gmail.com", "sri@mithraai.in"}
+
+
+async def get_admin_user(user: User = Depends(get_current_user)) -> User:
+    """Require the caller to be an owner/admin account. 403 otherwise."""
+    if user.email not in ADMIN_EMAILS:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Admin only")
+    return user
+
+
 async def get_optional_user(
     token: Optional[str] = Depends(oauth2_scheme),
     db: AsyncSession = Depends(get_db),

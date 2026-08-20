@@ -7,7 +7,7 @@ Economics (verified against actual API costs post model-routing):
 
   Free  ₹0    →   30 cr/month
   Pro   ₹198  →  300 cr/month   (worst case: 12 adapts × ₹9 API = ₹108 cost)
-  Elite ₹498  → 1000 cr/month   (worst case: 40 adapts × ₹9 API = ₹360 cost)
+  Elite ₹498  →  800 cr/month   (worst case: 32 adapts × ₹9 API = ₹288 cost)
 
 No rollover — balance resets to the plan allowance every 30 days (lazy, on read).
 Top-up packs (pure ~70% margin): ₹99 → 120 cr, ₹199 → 280 cr.
@@ -21,12 +21,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from db.database import get_db
 from db.models import User, CreditLedger
 
-PLAN_ALLOWANCE = {"free": 30, "pro": 300, "elite": 1000}
+PLAN_ALLOWANCE = {"free": 30, "pro": 300, "elite": 800}
 
 CREDIT_COSTS = {
     "resume_adapt": 25,       # Sonnet adaptation + cached JD parse + company intel
     "resume_build": 15,       # AI extract / full rebuild (Haiku)
-    "interview_session": 10,  # 7-question set (usually cache-hit = pure margin)
+    "interview_session": 15,  # 7-question set (usually cache-hit = pure margin)
     "interview_feedback": 3,  # per answer scored
     "cover_letter": 5,
     "auto_apply": 8,          # Playwright session (compute + assistant loop)

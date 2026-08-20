@@ -27,18 +27,18 @@ PLANS = {
             "~12 resume adaptations or mix freely",
             "All templates + PDF export",
             "Full network (10 contacts)",
-            "Interview prep + job tracker",
+            "Interview prep",
         ],
     },
     "elite": {
         "name": "Elite",
         "price_inr": 49800,  # paise (₹498)
         "price_display": "₹498/month",
-        "credits": 1000,
+        "credits": 800,
         "features": [
-            "1,000 credits every month",
+            "800 credits every month",
             "Everything in Pro",
-            "Auto-apply access",
+            "Advanced Company Intelligence",
             "Priority support",
             "LinkedIn profile review",
         ],

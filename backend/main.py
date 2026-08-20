@@ -1,4 +1,4 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
 from loguru import logger
@@ -12,6 +12,7 @@ from routers import chat, resume, jobs, apply, network, interview, tracker, auto
 from routers import auth as auth_router
 from routers import user_data, payments, referral, analytics, extension, company
 from db.database import init_db
+from middleware.auth import get_admin_user
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -52,8 +53,9 @@ app.include_router(jobs.router, prefix="/api/jobs", tags=["Jobs"])
 app.include_router(apply.router, prefix="/api/apply", tags=["Apply"])
 app.include_router(network.router, prefix="/api/network", tags=["Network"])
 app.include_router(interview.router, prefix="/api/interview", tags=["Interview"])
-app.include_router(tracker.router, prefix="/api/tracker", tags=["Tracker"])
-app.include_router(auto_apply.router, prefix="/api/auto-apply", tags=["Auto Apply"])
+# Tracker + Auto Apply are owner/admin-only features (403 for everyone else).
+app.include_router(tracker.router, prefix="/api/tracker", tags=["Tracker"], dependencies=[Depends(get_admin_user)])
+app.include_router(auto_apply.router, prefix="/api/auto-apply", tags=["Auto Apply"], dependencies=[Depends(get_admin_user)])
 
 # ── Auth / User / Payments routers ────────────────────────────────────────────
 app.include_router(auth_router.router, prefix="/api/auth", tags=["Auth"])
