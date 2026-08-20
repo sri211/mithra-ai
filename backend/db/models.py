@@ -1,7 +1,26 @@
 from sqlalchemy import Column, String, Integer, Float, DateTime, Text, ForeignKey, JSON, Enum as SAEnum
+from sqlalchemy.types import TypeDecorator
 from sqlalchemy.orm import relationship
 from datetime import datetime, timezone
 import enum
+
+
+class NaiveDateTime(TypeDecorator):
+    """Store all datetimes as naive UTC.
+
+    The app builds tz-aware `datetime.now(timezone.utc)` values everywhere, but
+    the columns are `TIMESTAMP WITHOUT TIME ZONE`. SQLite accepted aware values;
+    asyncpg/Postgres rejects them ("can't subtract offset-naive and offset-aware").
+    Strip tzinfo (normalized to UTC) on the way in so both backends behave the
+    same and existing naive-datetime comparisons in the code keep working.
+    """
+    impl = DateTime
+    cache_ok = True
+
+    def process_bind_param(self, value, dialect):
+        if value is not None and getattr(value, "tzinfo", None) is not None:
+            value = value.astimezone(timezone.utc).replace(tzinfo=None)
+        return value
 from db.database import Base
 
 
@@ -24,9 +43,9 @@ class User(Base):
     referral_code_used = Column(String, nullable=True, index=True)
     # Credit system — balance refreshed monthly per plan allowance (no rollover)
     credits_balance = Column(Integer, nullable=True)           # None = not yet initialized
-    credits_period_start = Column(DateTime, nullable=True)
-    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
-    updated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
+    credits_period_start = Column(NaiveDateTime, nullable=True)
+    created_at = Column(NaiveDateTime, default=lambda: datetime.now(timezone.utc))
+    updated_at = Column(NaiveDateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
 
     saved_resumes = relationship("SavedResume", back_populates="user", cascade="all, delete-orphan")
     saved_jobs = relationship("SavedJob", back_populates="user", cascade="all, delete-orphan")
@@ -46,7 +65,7 @@ class SavedResume(Base):
     resume_json = Column(JSON, nullable=False)
     template = Column(String, default="modern")
     ats_score = Column(Float, default=0.0)
-    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+    created_at = Column(NaiveDateTime, default=lambda: datetime.now(timezone.utc))
 
     user = relationship("User", back_populates="saved_resumes")
 
@@ -61,7 +80,7 @@ class SavedJob(Base):
     url = Column(String, nullable=True)
     status = Column(String, default="bookmarked")
     notes = Column(Text, nullable=True)
-    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+    created_at = Column(NaiveDateTime, default=lambda: datetime.now(timezone.utc))
 
     user = relationship("User", back_populates="saved_jobs")
 
@@ -79,7 +98,7 @@ class AdaptedResume(Base):
     template = Column(String, default="modern")
     ats_before = Column(Float, default=0.0)
     ats_after = Column(Float, default=0.0)
-    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+    created_at = Column(NaiveDateTime, default=lambda: datetime.now(timezone.utc))
 
     user = relationship("User", back_populates="adapted_resumes")
 
@@ -92,7 +111,7 @@ class JobSearch(Base):
     query = Column(String, nullable=False)
     location = Column(String, nullable=True)
     results_json = Column(JSON, nullable=True)
-    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+    created_at = Column(NaiveDateTime, default=lambda: datetime.now(timezone.utc))
 
     user = relationship("User", back_populates="job_searches")
 
@@ -112,7 +131,7 @@ class JobApplication(Base):
     adapted_resume = Column(JSON, nullable=True)
     cover_letter = Column(Text, nullable=True)
     jd_snippet = Column(Text, nullable=True)
-    applied_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+    applied_at = Column(NaiveDateTime, default=lambda: datetime.now(timezone.utc))
     notes = Column(Text, nullable=True)
 
     user = relationship("User", back_populates="job_applications")
@@ -128,7 +147,7 @@ class ApplyCampaign(Base):
     status = Column(String, default="active")
     jobs_found = Column(Integer, default=0)
     jobs_applied = Column(Integer, default=0)
-    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+    created_at = Column(NaiveDateTime, default=lambda: datetime.now(timezone.utc))
 
     user = relationship("User", back_populates="apply_campaigns")
 
@@ -141,7 +160,7 @@ class PortalCredential(Base):
     portal = Column(String, nullable=False)      # linkedin | naukri | instahyre | indeed
     username = Column(String, nullable=False)    # email or phone
     password_enc = Column(String, nullable=False)
-    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+    created_at = Column(NaiveDateTime, default=lambda: datetime.now(timezone.utc))
 
     user = relationship("User", back_populates="portal_credentials")
 
@@ -155,7 +174,7 @@ class CreditLedger(Base):
     delta = Column(Integer, nullable=False)          # +grant / -spend
     reason = Column(String, nullable=False)          # resume_adapt | monthly_reset | topup_99 | ...
     balance_after = Column(Integer, nullable=False)
-    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), index=True)
+    created_at = Column(NaiveDateTime, default=lambda: datetime.now(timezone.utc), index=True)
 
 
 class ChatKBEntry(Base):
@@ -169,7 +188,7 @@ class ChatKBEntry(Base):
     tags = Column(JSON, nullable=True)            # list[str]
     boost = Column(Float, default=0.0)            # positive-feedback boost
     enabled = Column(Integer, default=1)
-    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+    created_at = Column(NaiveDateTime, default=lambda: datetime.now(timezone.utc))
 
 
 class ChatFeedback(Base):
@@ -184,7 +203,7 @@ class ChatFeedback(Base):
     helpful = Column(Integer, nullable=False)              # 1 = 👍, 0 = 👎
     confidence = Column(Float, nullable=True)
     resolved = Column(Integer, default=0)                  # admin marked handled
-    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), index=True)
+    created_at = Column(NaiveDateTime, default=lambda: datetime.now(timezone.utc), index=True)
 
 
 class AICache(Base):
@@ -194,8 +213,8 @@ class AICache(Base):
     key = Column(String, primary_key=True)              # sha256 of namespace + normalized input
     namespace = Column(String, nullable=False, index=True)  # job_search | interview_qs | company_intel | ...
     value_json = Column(JSON, nullable=False)
-    expires_at = Column(DateTime, nullable=False, index=True)
-    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+    expires_at = Column(NaiveDateTime, nullable=False, index=True)
+    created_at = Column(NaiveDateTime, default=lambda: datetime.now(timezone.utc))
 
 
 class AnalyticsEvent(Base):
@@ -207,4 +226,4 @@ class AnalyticsEvent(Base):
     page = Column(String, nullable=True, index=True)     # /resume-builder, etc.
     feature = Column(String, nullable=True, index=True)  # resume_builder, job_finder, etc.
     metadata_json = Column(JSON, nullable=True)
-    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), index=True)
+    created_at = Column(NaiveDateTime, default=lambda: datetime.now(timezone.utc), index=True)
