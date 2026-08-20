@@ -26,6 +26,12 @@ def _normalize_db_url(url: str):
         q = [(k, v) for k, v in parse_qsl(parts.query) if k not in ("sslmode", "channel_binding")]
         url = urlunsplit((scheme, parts.netloc, parts.path, urlencode(q), parts.fragment))
         connect_args["ssl"] = True  # managed Postgres (Neon/Supabase) requires TLS
+        # Supabase / pgbouncer poolers reuse backend connections, which collides
+        # with asyncpg's server-side prepared statements ("prepared statement
+        # __asyncpg_... already exists"). Disable statement caching for poolers.
+        host = parts.hostname or ""
+        if "pooler." in host or "pgbouncer" in host:
+            connect_args["statement_cache_size"] = 0  # asyncpg connect() kwarg
     return url, connect_args
 
 
