@@ -114,14 +114,24 @@ async def generate_questions(
     company_tier: str = "",
     formats: Optional[list] = None,
 ) -> dict:
-    formats = formats or ["open"]
+    formats = [f for f in (formats or ["open"]) if f in ("open", "mcq", "coding")] or ["open"]
     count = max(3, min(int(count or 8), 15))
     from services.ai_cache import cache_get, cache_set
     ck = (role, company, interview_type, difficulty, str(count), topic,
           experience_level, degree, company_tier, ",".join(sorted(formats)))
-    cached = await cache_get("interview_qs_v2", *ck)
+    cached = await cache_get("interview_qs_v3", *ck)
     if cached and isinstance(cached, dict) and cached.get("questions"):
         return cached
+
+    has_open, has_mcq, has_coding = "open" in formats, "mcq" in formats, "coding" in formats
+    dist = []
+    if has_mcq:
+        dist.append("MCQ — aptitude/fundamentals/concept checks with exactly 4 options, a 0-based correct_option, and an explanation")
+    if has_coding:
+        dist.append("coding/SQL problems with a concise model_answer")
+    if has_open:
+        dist.append("open — answered by speaking/typing (behavioral, HR, case, design, conceptual)")
+    allowed = ", ".join(formats)
 
     content = (
         f"Role: {role}\n"
@@ -131,11 +141,14 @@ async def generate_questions(
         f"Question type: {interview_type}\n"
         f"Focus topic: {topic or 'none — cover the role broadly'}\n"
         f"Difficulty: {difficulty}\n"
-        f"Formats to include: {', '.join(formats)}\n"
         f"Count: EXACTLY {count}\n\n"
-        f"Generate {count} realistic questions. If MCQ is allowed, make ~40% MCQ (aptitude/fundamentals). "
-        f"If coding is allowed and the role is technical, include 1–2 coding/SQL problems. "
-        f"Keep the rest open. Every question must include a narrow 'topic' and a sensible time_limit_seconds."
+        f"STRICT FORMAT RULE: the ONLY allowed formats are [{allowed}]. Every question's \"format\" "
+        f"MUST be exactly one of these. Do NOT produce any question in a format outside this list.\n"
+        f"Split the {count} questions across these formats as evenly as makes sense: {'; '.join(dist)}.\n"
+        + ("" if has_open else
+           "'open' is NOT allowed — do NOT produce ANY free-text/essay/'walk me through' questions. "
+           "Turn concepts that would normally be open into MCQs (or coding problems if technical) instead.\n")
+        + f"Every question needs a narrow 'topic' and a sensible time_limit_seconds."
     )
     messages = [{"role": "user", "content": content}]
     try:
@@ -144,6 +157,11 @@ async def generate_questions(
         qs = result.get("questions") or []
         if not qs:
             raise ValueError("No questions in response")
+        # Enforce the format contract: drop any question the model returned in a
+        # format the user didn't ask for (belt-and-suspenders over the prompt).
+        filtered = [q for q in qs if q.get("format") in formats]
+        if filtered:
+            qs = filtered
         # normalize: ensure required fields exist so the frontend never breaks
         for i, q in enumerate(qs, 1):
             q.setdefault("id", f"q_{i:03d}")
@@ -156,7 +174,7 @@ async def generate_questions(
                 q.setdefault("options", [])
                 q.setdefault("correct_option", 0)
         result["questions"] = qs
-        await cache_set("interview_qs_v2", result, 24 * 30, *ck)
+        await cache_set("interview_qs_v3", result, 24 * 30, *ck)
         return result
     except Exception as e:
         from loguru import logger
