@@ -64,6 +64,17 @@ async def get_credits(
     }
 
 
+@router.post("/welcome-seen")
+async def mark_welcome_seen(
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Called once after a new user sees the '60 free credits' welcome popup."""
+    current_user.welcome_seen = 1
+    await db.commit()
+    return {"ok": True}
+
+
 # ── Saved Resumes ─────────────────────────────────────────────────────────────
 
 @router.post("/resumes")

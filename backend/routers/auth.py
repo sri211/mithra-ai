@@ -71,6 +71,8 @@ def _user_dict(user: User) -> dict:
         "email": user.email,
         "name": user.name,
         "plan": user.plan.value if user.plan else "free",
+        # 0 = brand-new account → frontend shows the "60 free credits" popup once.
+        "welcome_seen": int(getattr(user, "welcome_seen", 0) or 0),
     }
 
 

@@ -29,7 +29,7 @@ KB_SEED = [
      "triggers": ["how do credits work", "what are credits", "credit cost", "how much does each feature cost",
                   "how many credits", "credit system", "what costs credits", "coins"],
      "answer": "Mithra runs on **credits** that refresh monthly:\n"
-               "• Free: 30/mo · Pro (₹198): 300/mo · Elite (₹498): 800/mo\n\n"
+               "• Free: 60/mo · Pro (₹198): 300/mo · Elite (₹498): 800/mo\n\n"
                "Per-action cost: Resume Adapt **25** · AI Resume Build **15** · Interview Session **15** · "
                "Cover Letter **5** · Answer Feedback **3** · Job Search **2** · "
                "PDF Download **2** · Chat **FREE** · **Resume Score is FREE**.\n\n"
@@ -87,8 +87,8 @@ KB_SEED = [
      "triggers": ["how does interview prep work", "interview prep", "mock interview", "practice interview",
                   "prepare for interview on mithra"],
      "answer": "**[Interview Prep](/interview-prep)** generates realistic questions for your target role + "
-               "company, then scores your answers with specific feedback. Costs 10 credits for a session, "
-               "3 per answer evaluated."},
+               "company in multiple formats (voice, MCQ, coding), then scores your answers and gives a full "
+               "**Placement Readiness Report** at the end. Costs 15 credits for a session, 3 per answer evaluated."},
 
     {"id": "howto_tracker", "category": "mithra",
      "tags": ["tracker", "applications board"],
@@ -100,7 +100,7 @@ KB_SEED = [
     {"id": "howto_pricing", "category": "mithra",
      "tags": ["pricing", "upgrade", "plans"],
      "triggers": ["how to upgrade", "pricing", "plans", "how much is pro", "cost of elite", "subscription price"],
-     "answer": "**Plans:** Free ₹0 (30 credits/mo) · **Pro ₹198** (300 credits/mo) · **Elite ₹498** "
+     "answer": "**Plans:** Free ₹0 (60 credits/mo) · **Pro ₹198** (300 credits/mo) · **Elite ₹498** "
                "(800 credits/mo + Company Intelligence). One-time top-ups: ₹99 = 120 credits, ₹199 = 280. "
                "See [Pricing](/pricing)."},
 

@@ -44,6 +44,7 @@ class User(Base):
     # Credit system — balance refreshed monthly per plan allowance (no rollover)
     credits_balance = Column(Integer, nullable=True)           # None = not yet initialized
     credits_period_start = Column(NaiveDateTime, nullable=True)
+    welcome_seen = Column(Integer, default=0)                   # 0 = new user, show the "60 free credits" popup once
     created_at = Column(NaiveDateTime, default=lambda: datetime.now(timezone.utc))
     updated_at = Column(NaiveDateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
 

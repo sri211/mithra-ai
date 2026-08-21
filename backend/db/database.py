@@ -62,15 +62,27 @@ AsyncSessionLocal = async_sessionmaker(engine, class_=AsyncSession, expire_on_co
 class Base(DeclarativeBase):
     pass
 
+# Postgres: create_all does NOT add columns to already-existing tables, so new
+# columns on existing models must be ALTERed in explicitly (idempotent).
+_PG_COLUMN_MIGRATIONS = [
+    "ALTER TABLE users ADD COLUMN IF NOT EXISTS welcome_seen INTEGER DEFAULT 0",
+]
+
+
 async def init_db():
     async with engine.begin() as conn:
         # Create any missing tables
         await conn.run_sync(Base.metadata.create_all)
-        # Auto-migrate: add any missing columns to existing tables (SQLite only —
-        # a fresh Postgres DB gets every column from create_all, and the ALTER
-        # syntax below is SQLite-flavoured).
         if IS_SQLITE:
+            # Auto-migrate columns (SQLite-flavoured ALTER).
             await conn.run_sync(_add_missing_columns)
+        else:
+            from sqlalchemy import text
+            for ddl in _PG_COLUMN_MIGRATIONS:
+                try:
+                    await conn.execute(text(ddl))
+                except Exception as e:
+                    print(f"[DB migration] {ddl}: {e}")
 
 
 def _add_missing_columns(conn):

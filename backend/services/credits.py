@@ -5,7 +5,7 @@ Economics (verified against actual API costs post model-routing):
   Action costs are priced so the worst-case user (all credits on the most
   expensive action) still leaves ~45% margin on Pro and ~28% on Elite.
 
-  Free  ₹0    →   30 cr/month
+  Free  ₹0    →   60 cr/month  (launch bump — was 30)
   Pro   ₹198  →  300 cr/month   (worst case: 12 adapts × ₹9 API = ₹108 cost)
   Elite ₹498  →  800 cr/month   (worst case: 32 adapts × ₹9 API = ₹288 cost)
 
@@ -21,7 +21,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from db.database import get_db
 from db.models import User, CreditLedger
 
-PLAN_ALLOWANCE = {"free": 30, "pro": 300, "elite": 800}
+PLAN_ALLOWANCE = {"free": 60, "pro": 300, "elite": 800}
 
 CREDIT_COSTS = {
     "resume_adapt": 25,       # Sonnet adaptation + cached JD parse + company intel
